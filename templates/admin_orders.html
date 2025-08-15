@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="stats">
+    <span>Pending: {{ counts.pending }}</span>
+    <span>Shipped: {{ counts.shipped }}</span>
+    <span>Cancelled: {{ counts.cancelled }}</span>
+    <span>All: {{ counts.all }}</span>
+  </div>
+
+  <form method="post" action="/admin/orders/bulk-action" id="bulkForm">
+    <div class="actions">
+      <button type="submit" name="action" value="mark_shipped">Mark Shipped</button>
+      <button type="submit" name="action" value="cancel">Cancel</button>
+      <button type="submit" name="action" value="generate_labels">Generate Labels</button>
+    </div>
+
+    <table class="orders">
+      <thead>
+        <tr>
+          <th><input type="checkbox" id="select-all"></th>
+          <th>ID</th>
+          <th>Name</th>
+          <th>Phone</th>
+          <th>Email</th>
+          <th>Address</th>
+          <th>City/State/Pin</th>
+          <th>Qty</th>
+          <th>Status</th>
+          <th>Created</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for o in orders %}
+        <tr>
+          <td><input type="checkbox" name="order_ids" value="{{ o.id }}"></td>
+          <td>{{ o.id }}</td>
+          <td>{{ o.name }}</td>
+          <td>{{ o.phone }}</td>
+          <td>{{ o.email }}</td>
+          <td>
+            {{ o.addressLine1 }}
+            {% if o.addressLine2 %}, {{ o.addressLine2 }}{% endif %}
+            {% if o.landmark %}, {{ o.landmark }}{% endif %}
+          </td>
+          <td>{{ o.city }}, {{ o.state }} - {{ o.pincode }}</td>
+          <td>{{ o.quantity }}</td>
+          <td>{{ o.status }}</td>
+          <td style="white-space:nowrap">{{ o.created_at[:19] }}</td>
+          <td class="row-actions">
+            <a class="btn" href="/orders/{{ o.id }}/label" target="_blank">Label</a>
+            {% if o.status != 'cancelled' %}
+            <form method="post" action="/admin/orders/{{ o.id }}/cancel" style="display:inline">
+              <button class="btn outline" type="submit">Cancel</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </form>
+
+  <script>
+    const selectAll = document.getElementById('select-all');
+    selectAll?.addEventListener('change', () => {
+      document.querySelectorAll("input[name='order_ids']").forEach(cb => cb.checked = selectAll.checked);
+    });
+  </script>
+{% endblock %}

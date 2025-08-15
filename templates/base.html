@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Admin | Orders</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="/static/admin.css" rel="stylesheet">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Order Admin</div>
+    <nav>
+      <a href="/admin">Home</a>
+      <a href="/admin/orders?status=pending">Pending</a>
+      <a href="/admin/orders?status=shipped">Shipped</a>
+      <a href="/admin/orders?status=cancelled">Cancelled</a>
+      <a href="/admin/logout">Logout</a>
+    </nav>
+  </header>
+
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

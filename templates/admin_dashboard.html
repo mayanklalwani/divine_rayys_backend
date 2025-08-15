@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>Pending Orders</h2>
+  <div class="toolbar">
+    <input id="search" type="text" placeholder="Search name / email / phone" />
+    <select id="status">
+      <option value="pending" selected>pending</option>
+      <option value="shipped">shipped</option>
+      <option value="cancelled">cancelled</option>
+    </select>
+    <button id="refresh">Refresh</button>
+  </div>
+
+  <div class="table-wrap">
+    <table class="table" id="orders-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Created</th>
+          <th>Name</th>
+          <th>Phone</th>
+          <th>Address</th>
+          <th>City/State</th>
+          <th>Pincode</th>
+          <th>Qty</th>
+          <th>Status</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody><!-- rows injected by JS --></tbody>
+    </table>
+  </div>
+
+  <div class="pager">
+    <button id="prev">Prev</button>
+    <span id="pageinfo"></span>
+    <button id="next">Next</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+window.ADMIN = {
+  listUrl: "/admin/orders/list",
+  labelBase: "/orders",  // we will open /orders/{id}/label
+  statusUrl: (id) => `/admin/orders/${id}/status`
+};
+</script>
+{% endblock %}
