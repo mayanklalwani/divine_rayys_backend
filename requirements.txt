@@ -9,3 +9,5 @@ python-dotenv
 supabase
 h2
 reportlab
+qrcode
+pillow
