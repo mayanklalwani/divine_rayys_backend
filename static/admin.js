@@ -56,7 +56,7 @@
             <a href="${labelUrl}" target="_blank">Label</a>
             ${
               row.status !== "shipped"
-                ? `<button data-act="ship" data-id="${row.id}">Mark Shipped</button>`
+                ? `<button data-act="ship" data-id="${row.id}">Mark Dispatched</button>`
                 : ""
             }
           </td>

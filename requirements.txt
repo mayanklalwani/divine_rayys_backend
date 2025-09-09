@@ -4,3 +4,7 @@ python-multipart
 requests
 itsdangerous
 jinja2
+psycopg2-binary
+python-dotenv
+supabase
+h2
