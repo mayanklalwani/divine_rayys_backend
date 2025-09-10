@@ -6,6 +6,7 @@ from supabase import create_client, Client
 from math import floor
 from reportlab.lib.units import mm
 from reportlab.lib.utils import simpleSplit
+from reportlab.lib.pagesizes import A4, landscape
 import socket
 import os
 import uvicorn
@@ -64,86 +65,6 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 
 # Initialize Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# def _unpack_supabase_response(res):
-#     """
-#     Returns (data, error) where exactly one of them is non-None.
-#     Handles multiple response shapes from different supabase-py versions.
-#     """
-#     # 1) object-like: has .data and maybe .error
-#     if hasattr(res, "data") or hasattr(res, "error"):
-#         data = getattr(res, "data", None)
-#         err = getattr(res, "error", None)
-#         # some wrappers put error under res.error or res.status_code/res.message
-#         if err is None and hasattr(res, "status_code") and getattr(res, "status_code") not in (200, 201, None):
-#             # try to read message
-#             err = getattr(res, "message", None) or getattr(res, "error_message", None) or str(res)
-#         return data, err
-
-#     # 2) dict-like (e.g. {'data': ..., 'error': ...})
-#     if isinstance(res, dict):
-#         data = res.get("data") or res.get("body") or res.get("result")
-#         err = res.get("error") or res.get("message")
-#         return data, err
-
-#     # 3) some clients return (data, count) or other tuples — try common patterns
-#     if isinstance(res, (list, tuple)) and len(res) >= 1:
-#         # If it looks like (data, count) or similar, assume first element is data
-#         return res[0], None
-
-#     # Unknown shape — return None and an informative error
-#     # But include some introspection to help debugging
-#     try:
-#         info = {
-#             "type": str(type(res)),
-#             "repr": repr(res)[:200],
-#         }
-#         # attempt dir() if possible
-#         info["dir"] = sorted([d for d in dir(res) if not d.startswith("_")])[:60]
-#     except Exception:
-#         info = {"type": str(type(res))}
-#     return None, f"Unexpected Supabase response shape: {info}"
-
-
-
-# def _extract_public_url(pub_res):
-#     """
-#     Try to get a usable public URL from various shapes returned by get_public_url/create_signed_url/etc.
-#     Returns string URL or None.
-#     """
-#     if pub_res is None:
-#         return None
-#     # object-like with .get or .data
-#     if hasattr(pub_res, "get") and callable(getattr(pub_res, "get")):
-#         # dict-like
-#         for key in ("publicURL", "public_url", "url", "signedURL", "signed_url", "publicUrl"):
-#             if key in pub_res:
-#                 return pub_res[key]
-#         # some responses store under 'data'
-#         if "data" in pub_res and isinstance(pub_res["data"], dict):
-#             for key in ("publicURL", "public_url", "url", "signedURL"):
-#                 if key in pub_res["data"]:
-#                     return pub_res["data"][key]
-#     # object with attributes
-#     for attr in ("publicURL", "public_url", "url", "signedURL", "data"):
-#         if hasattr(pub_res, attr):
-#             val = getattr(pub_res, attr)
-#             # if data is nested
-#             if isinstance(val, dict):
-#                 for key in ("publicURL", "public_url", "url", "signedURL"):
-#                     if key in val:
-#                         return val[key]
-#             if isinstance(val, str):
-#                 return val
-#     # fallback: try str()
-#     s = str(pub_res)
-#     if "http" in s:
-#         # naive attempt to extract first http... substring
-#         import re
-#         m = re.search(r"https?://[^\s'\"]+", s)
-#         if m:
-#             return m.group(0)
-#     return None
 
 def _unpack_supabase_response(res):
     """
@@ -293,18 +214,6 @@ HOST = os.getenv("host", "db.zjgzqudobxmqgulyhgft.supabase.co")
 PORT = os.getenv("port", "5432")
 DBNAME = os.getenv("dbname", "postgres")
 
-# def get_conn():
-#     # conn = sqlite3.connect(DB_PATH)
-#     # conn.row_factory = sqlite3.Row
-#     conn = psycopg2.connect(
-#         user=USER,
-#         password=PASSWORD,
-#         host=HOST,
-#         port=PORT,
-#         dbname=DBNAME
-#     )
-#     return conn
-
 def get_conn():
     """
     IPv4-first DB connector:
@@ -394,80 +303,8 @@ def get_conn():
         "Tried IPv4 addresses, hostname, and IPv6 addresses. See logs for details."
     ) from last_exc
 
-# def get_conn():
-#     """
-#     Try to connect using DATABASE_URL (if present). If that fails or resolves
-#     only to IPv6, try an IPv4-resolved host literal (works around IPv6 routing).
-#     Ensures sslmode=require for Supabase.
-#     """
-#     database_url = os.getenv("DATABASE_URL")  # if you set this in Render, good
-#     connect_timeout = int(os.getenv("DB_CONNECT_TIMEOUT", "10"))
-
-#     # helper to ensure sslmode in URL
-#     def ensure_ssl(url):
-#         if "sslmode=" not in url:
-#             return url + ("&" if "?" in url else "?") + "sslmode=require"
-#         return url
-
-#     # If DATABASE_URL present, try normal connect first
-#     if database_url:
-#         database_url = ensure_ssl(database_url)
-#         try:
-#             return psycopg2.connect(database_url, connect_timeout=connect_timeout)
-#         except Exception:
-#             # fall through to IPv4 fallback below
-#             pass
-
-#     # Build URL from individual env vars if DATABASE_URL not set
-#     user = os.getenv("DB_USER") or os.getenv("user")
-#     password = os.getenv("DB_PASS") or os.getenv("password")
-#     host = os.getenv("DB_HOST") or os.getenv("host")
-#     port = os.getenv("DB_PORT") or os.getenv("port") or "5432"
-#     dbname = os.getenv("DB_NAME") or os.getenv("dbname")
-
-#     if not all([user, password, host, dbname]):
-#         raise RuntimeError("Database config missing. Set DATABASE_URL or DB_USER/DB_PASS/DB_HOST/DB_NAME in env.")
-
-#     base_url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
-#     url_with_ssl = ensure_ssl(base_url)
-
-#     # First try normal connect (may resolve to IPv6 which fails)
-#     try:
-#         return psycopg2.connect(url_with_ssl, connect_timeout=connect_timeout)
-#     except Exception as first_exc:
-#         # Try IPv4 resolution fallback
-#         try:
-#             infos = socket.getaddrinfo(host, int(port), family=socket.AF_INET, type=socket.SOCK_STREAM)
-#             if not infos:
-#                 raise RuntimeError("No IPv4 address found for host")
-#             ipv4 = infos[0][4][0]
-#             # connect to IPv4 literal
-#             conn = psycopg2.connect(
-#                 user=user,
-#                 password=password,
-#                 host=ipv4,
-#                 port=port,
-#                 dbname=dbname,
-#                 connect_timeout=connect_timeout,
-#                 sslmode="require"
-#             )
-#             return conn
-#         except Exception as ipv4_exc:
-#             # raise a combined informative error
-#             raise RuntimeError(
-#                 "Failed to connect to Postgres. Tried normal connect and IPv4 fallback.\n"
-#                 f"Normal error: {first_exc}\nIPv4 fallback error: {ipv4_exc}\n\n"
-#                 "If IPv4 fallback fails, either the host has no A record, or outbound IPv4 is blocked. "
-#                 "Consider using the Supabase HTTP client instead (no port 5432) or check platform networking."
-#             ) from ipv4_exc
-
-
 # Validation helper
-def validate_order_data(email, phone, name, addressLine1, pincode, city, state, quantity, paymentProof):
-    print("Validating email")
-    if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
-        raise HTTPException(status_code=400, detail="Invalid email format")
-
+def validate_order_data(phone, name, addressLine1, pincode, city, state, quantity, paymentProof):
     print("Validating phone number")
     if not re.match(r"^\d{10}$", phone):
         raise HTTPException(status_code=400, detail="Phone must be exactly 10 digits")
@@ -498,106 +335,8 @@ def validate_order_data(email, phone, name, addressLine1, pincode, city, state, 
     if paymentProof.size > 5 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Payment proof must be under 5MB")
 
-
-# @app.post("/orders")
-# async def create_order(
-#     email: str = Form(...),
-#     phone: str = Form(...),
-#     name: str = Form(...),
-#     addressLine1: str = Form(...),
-#     addressLine2: str = Form(""),
-#     landmark: str = Form(""),
-#     pincode: str = Form(...),
-#     city: str = Form(...),
-#     state: str = Form(...),
-#     country: str = Form("India"),
-#     quantity: int = Form(...),
-#     paymentProof: UploadFile = None
-# ):
-#     # Run validations
-#     print("Running validations")
-#     validate_order_data(email, phone, name, addressLine1, pincode, city, state, quantity, paymentProof)
-#     print("Validations completed")
-
-#     # Check if this phone or email already exists in DB
-#     # conn = sqlite3.connect("orders.db")
-#     conn = get_conn()
-#     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-#     cursor.execute(
-#         "SELECT id FROM orders WHERE status='pending' AND (email=%s OR phone=%s) LIMIT 1",
-#         (email, phone)
-#     )
-#     existing_order = cursor.fetchone()
-#     if existing_order:
-#         conn.close()
-#         raise HTTPException(
-#             status_code=400,
-#             detail="Your order is already submitted. We do not accept multiple orders."
-#         )
-
-#     # Store in DB
-#     # insert_query = """
-#     #     INSERT INTO orders (
-#     #         email, phone, name, addressLine1, addressLine2, landmark,
-#     #         pincode, city, state, country, quantity, created_at
-#     #     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-#     #     RETURNING id
-#     # """, (
-#     #     email, phone, name, addressLine1, addressLine2, landmark,
-#     #     pincode, city, state, country, quantity, 
-#     #     datetime.now().isoformat()
-#     # )
-#     cursor.execute("""
-#         INSERT INTO orders (
-#             email, phone, name, addressLine1, addressLine2, landmark,
-#             pincode, city, state, country, quantity, created_at
-#         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-#         RETURNING id
-#     """, (
-#         email, phone, name, addressLine1, addressLine2, landmark,
-#         pincode, city, state, country, quantity, 
-#         datetime.now().isoformat()
-#     ))
-#     # print(f" Insert query = {insert_query}")
-#     order_id = cursor.fetchone()["id"]
-#     conn.commit()
-
-#     # Save file
-#     # payment_proof_path = None
-#     # if paymentProof:
-#     #     filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{paymentProof.filename}"
-#     #     payment_proof_path = os.path.join(UPLOAD_FOLDER, filename)
-#     #     with open(payment_proof_path, "wb") as buffer:
-#     #         buffer.write(await paymentProof.read())
-#     payment_proof_url = None
-#     if paymentProof:
-#         filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{paymentProof.filename}"
-#         file_bytes = await paymentProof.read()
-
-#         # Upload to Supabase bucket
-#         supabase_path = f"uploads/{order_id}/{filename}"
-#         try:
-#             supabase.storage.from_(BUCKET).upload(
-#                 path=supabase_path,
-#                 file=file_bytes,
-#                 file_options={"content-type": paymentProof.content_type}
-#             )
-#             # Public URL (if bucket is public)
-#             payment_proof_url = supabase.storage.from_(BUCKET).get_public_url(supabase_path)
-#         except Exception as e:
-#             conn.close()
-#             raise HTTPException(status_code=500, detail=f"Failed to upload payment proof: {e}")
-
-#         # Update row with paymentProof path
-#         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-#         cursor.execute("UPDATE orders SET paymentProof=%s WHERE id=%s", (payment_proof_url, order_id))
-#         conn.commit()
-
-#     return {"message": "Order received successfully", "order_id": order_id, "paymentProof": payment_proof_url}
-
 @app.post("/orders")
 async def create_order(
-    email: str = Form(...),
     phone: str = Form(...),
     name: str = Form(...),
     addressLine1: str = Form(...),
@@ -611,18 +350,10 @@ async def create_order(
     paymentProof: UploadFile = None
 ):
     # Validations (keep your existing check)
-    validate_order_data(email, phone, name, addressLine1, pincode, city, state, quantity, paymentProof)
+    validate_order_data(phone, name, addressLine1, pincode, city, state, quantity, paymentProof)
 
     # ---- 1) check existing pending order by email or phone ----
     try:
-        res_email = supabase.table("orders").select("id").eq("email", email).eq("status", "pending").limit(1).execute()
-        data_e, err_e = _unpack_supabase_response(res_email)
-        if err_e:
-            logger.error("Supabase error while checking email: %s", err_e)
-            raise HTTPException(status_code=500, detail=f"Supabase check failed: {err_e}")
-        if data_e and len(data_e) > 0:
-            raise HTTPException(status_code=400, detail="Your order is already submitted. We do not accept multiple orders.")
-
         res_phone = supabase.table("orders").select("id").eq("phone", phone).eq("status", "pending").limit(1).execute()
         data_p, err_p = _unpack_supabase_response(res_phone)
         if err_p:
@@ -639,7 +370,6 @@ async def create_order(
     # ---- 2) insert order row ----
     now_iso = datetime.now().isoformat()
     payload = {
-        "email": email,
         "phone": phone,
         "name": name,
         "addressline1": addressLine1,
@@ -734,15 +464,14 @@ async def create_order(
             raise HTTPException(status_code=500, detail=f"Failed to upload payment proof: {e}")
 
     # success
-    return {"message": "Order received successfully", "order_id": order_id, "paymentProof": payment_proof_url}
+    return {"message": "Order received successfully", "order_id": order_id, "paymentProof": payment_proof_url, "quantity": quantity}
 
 # ---------- Label Generation ----------
 FROM_BLOCK = [
     "From :",
-    "Mayank Lalwani,",
-    "Scheme 103, Indore,",
-    "Mobile: +91-7045494748,",
-    "Indore, Madhya Pradesh - 452001",
+    "Kaillash Rrohida,",
+    "Indore,",
+    "Mobile: +91-9893270011",
 ]
 
 def draw_wrapped_text(c, text, x, y, max_width, font_name="Helvetica", font_size=11, leading=14):
@@ -775,6 +504,8 @@ def draw_label_page(c, order):
     name_line = (order["name"] or "").strip()
     y = draw_wrapped_text(c, name_line, x_left, y, maxw)
 
+
+
     addr_parts = [
         (order["addressline1"] or "").strip(),
         (order["addressline2"] or "").strip(),
@@ -802,89 +533,42 @@ def draw_label_page(c, order):
 
 # def draw_label_block(c, order, x_left, y_top, slot_width, slot_height):
 #     """
-#     Draw a single label inside the rectangle defined by:
-#       - top-left corner (x_left, y_top)
-#       - slot_width (width of the label area)
-#       - slot_height (height of the label area)
-#     Coordinates: origin is bottom-left; y_top is measured from bottom.
-#     We draw top-down starting at y_top.
+#     Draw a single label in the slot rectangle (x_left, y_top) with slot_width x slot_height.
+#     Ensures FROM block is wrapped to slot_width and body text doesn't overlap it.
 #     """
-#     # Keep font sizes consistent with your single-label version
-#     leading = 12
-#     name_font = ("Helvetica-Bold", 12)
-#     body_font = ("Helvetica", 11)
-
-#     # start drawing from y_top downward (ReportLab coordinates bottom-left)
-#     y = y_top
-
-#     # "To," heading
-#     c.setFont(name_font[0], name_font[1])
-#     # place "To," a little inset from left
-#     inset = 4 * mm
-#     c.drawString(x_left + inset, y, "To,")
-#     y -= leading
-
-#     # Recipient name
-#     c.setFont(body_font[0], body_font[1])
-#     name_line = (order.get("name") or "").strip()
-#     # Draw name with wrapping inside the slot width minus inset
-#     maxw = slot_width - (2 * inset)
-#     y = draw_wrapped_text_slot(c, name_line, x_left + inset, y, maxw, font_name=body_font[0], font_size=body_font[1], leading=leading)
-
-#     # Address parts
-#     addr_parts = [
-#         (order.get("addressline1") or "").strip(),
-#         (order.get("addressline2") or "").strip(),
-#         (order.get("landmark") or "").strip(),
-#     ]
-#     addr_text = ", ".join([p for p in addr_parts if p])
-#     city_state_pin = ", ".join([v for v in [order.get("city"), order.get("state")] if v])
-#     if order.get("pincode"):
-#         city_state_pin = f"{city_state_pin} - {order.get('pincode')}" if city_state_pin else order.get("pincode")
-
-#     if addr_text:
-#         y = draw_wrapped_text_slot(c, addr_text, x_left + inset, y, maxw, font_name=body_font[0], font_size=body_font[1], leading=leading)
-#     if city_state_pin:
-#         y = draw_wrapped_text_slot(c, city_state_pin, x_left + inset, y, maxw, font_name=body_font[0], font_size=body_font[1], leading=leading)
-
-#     # FROM block at the bottom of the slot (align to slot bottom + inset)
-#     # We will draw the FROM block starting from slot bottom + small inset, upwards
-#     from_block = FROM_BLOCK  # reuse your constant
-#     c.setFont("Helvetica", 10)
-#     bottom_y = (y_top - slot_height) + (1.5 * mm) + (len(from_block) * 12)  # compute a baseline to draw upwards
-#     # We'll draw lines at increasing y from slot bottom + inset
-#     cur_y = (y_top - slot_height) + (4 * mm) + (len(from_block)-1) * 12
-#     for line in from_block:
-#         c.drawString(x_left + inset, cur_y, line)
-#         cur_y -= 12
-
-# def draw_label_block(c, order, x_left, y_top, slot_width, slot_height):
-#     """
-#     Draw a single label inside the rectangle defined by:
-#       - top-left corner (x_left, y_top)
-#       - slot_width (width of the label area)
-#       - slot_height (height of the label area)
-#     Ensures the FROM block occupies reserved bottom space and body text won't overlap it.
-#     """
+#     # visual metrics
 #     leading = 12
 #     name_font = ("Helvetica-Bold", 12)
 #     body_font = ("Helvetica", 11)
 #     inset = 4 * mm
 #     gap_between_body_and_from = 3 * mm
+#     from_font = ("Helvetica", 10)
+#     from_line_height = 12  # vertical spacing for FROM lines
 
-#     # compute FROM block height (approx)
-#     from_lines = FROM_BLOCK  # list of strings
-#     from_line_height = 12  # same as earlier; adjust if desired
-#     from_height = len(from_lines) * from_line_height
+#     # Prepare FROM block wrapped to slot width
+#     maxw = slot_width - 2 * inset
+#     raw_from_lines = FROM_BLOCK if isinstance(FROM_BLOCK, (list, tuple)) else [FROM_BLOCK]
+#     wrapped_from_lines = []
+#     for raw in raw_from_lines:
+#         if not raw:
+#             continue
+#         # simpleSplit returns wrapped lines for the available width
+#         wrapped = simpleSplit(raw, from_font[0], from_font[1], maxw)
+#         if wrapped:
+#             wrapped_from_lines.extend(wrapped)
+#         else:
+#             wrapped_from_lines.append(raw)
 
-#     # Reserve bottom area for FROM block (inset + from_height + small gap)
+#     from_height = len(wrapped_from_lines) * from_line_height
+
+#     # Reserve bottom area for FROM block + inset + small gap
 #     reserved_bottom = inset + from_height + gap_between_body_and_from
 
-#     # compute minimum Y the body may go down to
-#     slot_bottom_y = (y_top - slot_height)
+#     # Compute boundaries
+#     slot_bottom_y = y_top - slot_height
 #     min_allowed_y_for_body = slot_bottom_y + reserved_bottom
 
-#     # Start drawing header & body from y_top downward
+#     # Start drawing from top
 #     y = y_top
 
 #     # "To," heading
@@ -895,14 +579,13 @@ def draw_label_page(c, order):
 #     # Recipient name
 #     c.setFont(body_font[0], body_font[1])
 #     name_line = (order.get("name") or "").strip()
-#     maxw = slot_width - (2 * inset)
 #     y = draw_wrapped_text_slot(
 #         c, name_line, x_left + inset, y,
 #         maxw, min_allowed_y_for_body,
 #         font_name=body_font[0], font_size=body_font[1], leading=leading
 #     )
 
-#     # Address parts
+#     # Address fields (joined)
 #     addr_parts = [
 #         (order.get("addressline1") or "").strip(),
 #         (order.get("addressline2") or "").strip(),
@@ -916,7 +599,7 @@ def draw_label_page(c, order):
 #             font_name=body_font[0], font_size=body_font[1], leading=leading
 #         )
 
-#     # City/State + pincode
+#     # city/state/pincode
 #     city_state_pin = ", ".join([v for v in [order.get("city"), order.get("state")] if v])
 #     if order.get("pincode"):
 #         city_state_pin = f"{city_state_pin} - {order.get('pincode')}" if city_state_pin else order.get("pincode")
@@ -928,46 +611,44 @@ def draw_label_page(c, order):
 #             font_name=body_font[0], font_size=body_font[1], leading=leading
 #         )
 
-#     # Draw FROM block strictly inside reserved bottom area.
-#     # We'll draw FROM lines starting from slot bottom + inset and going upwards.
-#     # compute starting y for FROM drawing (topmost line y coordinate)
-#     # slot_bottom_y + inset is the baseline for the FIRST from line (bottom-most),
-#     # but we want to draw lines from top to bottom inside that reserved area.
-#     # So set start_y = slot_bottom_y + inset + (from_height - from_line_height)
-#     start_y = slot_bottom_y + inset + (from_height - from_line_height)
+#     # Now draw the FROM block inside the reserved bottom area.
+#     # We'll draw from top-to-bottom inside that reserved area.
+#     c.setFont(from_font[0], from_font[1])
 
-#     c.setFont("Helvetica", 10)
-#     for i, line in enumerate(from_lines):
-#         # draw each line moving downward
-#         line_y = start_y - i * from_line_height
-#         # ensure this y is inside the slot (safety)
+#     # compute starting y for first FROM line (topmost of FROM block)
+#     # topmost_from_y = slot_bottom_y + reserved_bottom - (inset) - (from_line_height - (from_line_height))
+#     # simpler: position first wrapped_from_lines[0] at slot_bottom_y + reserved_bottom - (from_line_height)
+#     topmost_from_y = slot_bottom_y + inset + from_height - from_line_height
+#     # Draw each wrapped FROM line in order
+#     for i, line in enumerate(wrapped_from_lines):
+#         line_y = topmost_from_y - i * from_line_height
+#         # safety clamp: do not draw below slot bottom + inset
 #         if line_y < slot_bottom_y + inset - 1:
-#             # if somehow it would go outside, skip (safety)
 #             continue
 #         c.drawString(x_left + inset, line_y, line)
 
 def draw_label_block(c, order, x_left, y_top, slot_width, slot_height):
     """
-    Draw a single label in the slot rectangle (x_left, y_top) with slot_width x slot_height.
+    Draw a single label inside slot rectangle (x_left, y_top) with slot_width x slot_height.
     Ensures FROM block is wrapped to slot_width and body text doesn't overlap it.
+    NOTE: y_top is the top edge of the slot (measured from page bottom).
     """
     # visual metrics
-    leading = 12
-    name_font = ("Helvetica-Bold", 12)
-    body_font = ("Helvetica", 11)
-    inset = 4 * mm
-    gap_between_body_and_from = 3 * mm
+    leading = 17
+    name_font = ("Helvetica", 16)
+    body_font = ("Helvetica", 16)
+    inset = 6 * mm              # horizontal & vertical inset inside slot
+    gap_between_body_and_from = 1 * mm
     from_font = ("Helvetica", 10)
     from_line_height = 12  # vertical spacing for FROM lines
 
-    # Prepare FROM block wrapped to slot width
+    # Prepare FROM block wrapped to slot width (respect inset)
     maxw = slot_width - 2 * inset
     raw_from_lines = FROM_BLOCK if isinstance(FROM_BLOCK, (list, tuple)) else [FROM_BLOCK]
     wrapped_from_lines = []
     for raw in raw_from_lines:
         if not raw:
             continue
-        # simpleSplit returns wrapped lines for the available width
         wrapped = simpleSplit(raw, from_font[0], from_font[1], maxw)
         if wrapped:
             wrapped_from_lines.extend(wrapped)
@@ -983,8 +664,8 @@ def draw_label_block(c, order, x_left, y_top, slot_width, slot_height):
     slot_bottom_y = y_top - slot_height
     min_allowed_y_for_body = slot_bottom_y + reserved_bottom
 
-    # Start drawing from top
-    y = y_top
+    # Start drawing from top, but apply a vertical top inset so text doesn't draw above the slot
+    y = y_top - inset
 
     # "To," heading
     c.setFont(name_font[0], name_font[1])
@@ -1026,15 +707,20 @@ def draw_label_block(c, order, x_left, y_top, slot_width, slot_height):
             font_name=body_font[0], font_size=body_font[1], leading=leading
         )
 
+    
+    qty = order.get("quantity") or 0
+    if qty:
+        y -= 2  # a small vertical gap (adjust if needed)
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(x_left + inset, y, f"Qty: {int(qty)}")
+        y -= leading
+        c.setFont(body_font[0], body_font[1])  # restore body font for next lines
+
     # Now draw the FROM block inside the reserved bottom area.
-    # We'll draw from top-to-bottom inside that reserved area.
     c.setFont(from_font[0], from_font[1])
 
-    # compute starting y for first FROM line (topmost of FROM block)
-    # topmost_from_y = slot_bottom_y + reserved_bottom - (inset) - (from_line_height - (from_line_height))
-    # simpler: position first wrapped_from_lines[0] at slot_bottom_y + reserved_bottom - (from_line_height)
+    # compute starting y for first FROM line (topmost of FROM block) inside reserved area
     topmost_from_y = slot_bottom_y + inset + from_height - from_line_height
-    # Draw each wrapped FROM line in order
     for i, line in enumerate(wrapped_from_lines):
         line_y = topmost_from_y - i * from_line_height
         # safety clamp: do not draw below slot bottom + inset
@@ -1042,63 +728,6 @@ def draw_label_block(c, order, x_left, y_top, slot_width, slot_height):
             continue
         c.drawString(x_left + inset, line_y, line)
 
-# def draw_wrapped_text_slot(c, text, x, y, max_width, font_name="Helvetica", font_size=11, leading=14):
-#     """
-#     Like draw_wrapped_text but constrained to a slot; returns new y position AFTER drawing.
-#     Uses reportlab.lib.utils.simpleSplit like earlier helper.
-#     """
-#     c.setFont(font_name, font_size)
-#     lines = simpleSplit(text, font_name, font_size, max_width)
-#     for i, line in enumerate(lines):
-#         c.drawString(x, y - i * leading, line)
-#     return y - (len(lines) * leading)
-
-# def draw_wrapped_text_slot(c, text, x, y, max_width, min_y, font_name="Helvetica", font_size=11, leading=14):
-#     """
-#     Draw wrapped text starting at y and NOT going below min_y.
-#     If text lines exceed available space, truncate and append '...'.
-#     Returns new y after drawing.
-#     - c: canvas
-#     - text: string
-#     - x: left x coordinate
-#     - y: start y (top)
-#     - max_width: maximum width for wrapping
-#     - min_y: minimum allowed y (bottom boundary inside slot)
-#     """
-#     c.setFont(font_name, font_size)
-#     lines = simpleSplit(text, font_name, font_size, max_width)
-
-#     # compute how many lines fit between y and min_y
-#     available_height = y - min_y
-#     if available_height <= 0:
-#         # no room
-#         return min_y
-
-#     max_lines = max(0, floor(available_height / leading))
-
-#     if len(lines) == 0:
-#         return y
-
-#     if len(lines) > max_lines:
-#         # truncate and add ellipsis to last allowed line (try to fit)
-#         allowed = lines[:max_lines]
-#         if allowed:
-#             last = allowed[-1]
-#             # try to trim last line to append '...'
-#             # simple approach: trim characters until it fits with "..."
-#             ell = "..."
-#             while simpleSplit(last + ell, font_name, font_size, max_width) and simpleSplit(last + ell, font_name, font_size, max_width)[-1] != (last + ell):
-#                 # break if something odd (safety)
-#                 break
-#             allowed[-1] = (allowed[-1].rstrip() + ell)
-#         lines_to_draw = allowed
-#     else:
-#         lines_to_draw = lines
-
-#     for i, line in enumerate(lines_to_draw):
-#         c.drawString(x, y - i * leading, line)
-
-#     return y - (len(lines_to_draw) * leading)
 
 def draw_wrapped_text_slot(c, text, x, y, max_width, min_y, font_name="Helvetica", font_size=11, leading=14):
     """
@@ -1136,18 +765,6 @@ def draw_wrapped_text_slot(c, text, x, y, max_width, min_y, font_name="Helvetica
 
     return y - (len(lines_to_draw) * leading)
 
-
-
-
-# @app.get("/orders")
-# def get_orders():
-#     conn = get_conn()
-#     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-#     cursor.execute("SELECT * FROM orders ORDER BY created_at DESC")
-#     rows = cursor.fetchall()
-#     conn.close()
-#     return {"orders": rows}
-
 @app.get("/orders")
 def get_orders():
     try:
@@ -1171,15 +788,6 @@ def get_orders():
         logger.exception("Unexpected exception while fetching orders: %s", e)
         raise HTTPException(status_code=500, detail=f"Failed to fetch orders: {e}")
 
-
-# def generate_label_pdf(order):
-#     file_path = os.path.join(LABEL_FOLDER, f"label_{order['id']}.pdf")
-#     c = canvas.Canvas(file_path, pagesize=A6)
-#     draw_label_page(c, order)
-#     c.showPage()
-#     c.save()
-#     return file_path
-
 def generate_label_pdf(order):
     """
     Keep single-label PDF generation for the single-order endpoint unchanged.
@@ -1200,23 +808,6 @@ def generate_label_pdf(order):
     c.showPage()
     c.save()
     return file_path
-
-# def generate_bulk_labels(order_ids):
-#     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-#     pdf_path = os.path.join(LABEL_FOLDER, f"labels_bulk_{ts}.pdf")
-#     c = canvas.Canvas(pdf_path, pagesize=A6)
-#     conn = get_conn()
-#     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-#     for oid in order_ids:
-#         cur.execute("SELECT * FROM orders WHERE id=%s", (oid,))
-#         row = cur.fetchone()
-#         if not row:
-#             continue
-#         draw_label_page(c, row)
-#         c.showPage()
-#     conn.close()
-#     c.save()
-#     return pdf_path
 
 def generate_bulk_labels(order_ids):
     """
@@ -1277,25 +868,139 @@ def generate_bulk_labels(order_ids):
     c.save()
     return pdf_path
 
-# Endpoint to generate and download label for a single order
-# @app.get("/orders/{order_id}/label")
-# def get_order_label(order_id: int):
+# def generate_bulk_labels_a4(order_ids):
+#     """
+#     Generates labels on A4 landscape sheets.
+#     Layout: 3 columns × 2 rows = 6 labels per page.
+#     Each label has a border rectangle.
+#     """
+#     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+#     pdf_path = os.path.join(LABEL_FOLDER, f"labels_bulk_a4_{ts}.pdf")
+
+#     # A4 in landscape orientation
+#     page_width, page_height = landscape(A4)
+
+#     # 3 cols × 2 rows grid
+#     cols, rows = 3, 2
+#     slot_width = page_width / cols
+#     slot_height = page_height / rows
+
+#     c = canvas.Canvas(pdf_path, pagesize=(page_width, page_height))
+
 #     conn = get_conn()
-#     # conn.row_factory = sqlite3.Row
-#     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-#     cursor.execute("SELECT * FROM orders WHERE id = %s", (order_id,))
-#     order_row  = cursor.fetchone()
+#     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+#     for i, oid in enumerate(order_ids):
+#         # Fetch order
+#         cur.execute("SELECT * FROM orders WHERE id=%s", (oid,))
+#         row = cur.fetchone()
+#         if not row:
+#             continue
+#         order = dict(row)
+
+#         # Grid position
+#         grid_index = i % (cols * rows)  # 0..5
+#         col = grid_index % cols
+#         row_num = grid_index // cols
+
+#         # Top-left of this slot
+#         x_left = col * slot_width
+#         y_top = page_height - (row_num * slot_height)
+
+#         # Draw border rectangle
+#         c.rect(x_left, y_top - slot_height, slot_width, slot_height)
+
+#         # Draw label content
+#         draw_label_block(c, order, x_left, y_top, slot_width, slot_height)
+
+#         # After 6 labels, start a new page
+#         if grid_index == (cols * rows - 1):
+#             c.showPage()
+
 #     conn.close()
+#     c.save()
+#     return pdf_path
 
-#     if not order_row :
-#         raise HTTPException(status_code=404, detail="Order not found")
+def generate_bulk_labels_a4(order_ids):
+    """
+    A4 landscape, 3 columns x 2 rows = 6 labels per page.
+    Adds outer margins and border around each slot.
+    """
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    pdf_path = os.path.join(LABEL_FOLDER, f"labels_bulk_a4_{ts}.pdf")
 
-#     # Convert Row to dict
-#     order = dict(order_row)
+    # A4 landscape
+    page_width, page_height = landscape(A4)
 
-#     # Generate PDF
-#     label_path = generate_label_pdf(order)
-#     return FileResponse(label_path, media_type="application/pdf", filename=f"label_{order_id}.pdf")
+    # layout grid
+    cols, rows = 3, 2
+
+    # outer margin (adjust if you need larger margins)
+    margin = 10 * mm
+
+    # compute usable area inside margins
+    usable_width = page_width - 2 * margin
+    usable_height = page_height - 2 * margin
+
+    # slot sizes
+    slot_width = usable_width / cols
+    slot_height = usable_height / rows
+
+    # gutter between slots (optional)
+    gutter = 4 * mm
+
+    c = canvas.Canvas(pdf_path, pagesize=(page_width, page_height))
+
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    # iterate orders and place them in grid; create a new page every cols*rows items
+    for i, oid in enumerate(order_ids):
+        # fetch order
+        cur.execute("SELECT * FROM orders WHERE id=%s", (oid,))
+        row = cur.fetchone()
+        if not row:
+            continue
+        order = dict(row)
+
+        # index within page (0 .. cols*rows-1)
+        index_in_page = i % (cols * rows)
+        col = index_in_page % cols
+        row_idx = index_in_page // cols  # 0 = top row, 1 = bottom row (we'll invert below)
+
+        # compute top-left of slot (ReportLab origin is bottom-left)
+        x_left = margin + col * slot_width
+        # for y, row_idx 0 should be TOP row -> y_top = page_height - margin - (row_idx * slot_height)
+        y_top = page_height - margin - (row_idx * slot_height)
+
+        # Draw border rectangle for the slot
+        c.setLineWidth(0.6)
+        c.rect(x_left, y_top - slot_height, slot_width, slot_height)
+
+        # (Optional) draw vertical separator dashed line between columns (visual aid)
+        # you can uncomment if you also want dashed lines between slots
+        # if col < cols - 1:
+        #     sep_x = x_left + slot_width + (gutter / 2.0)
+        #     c.setDash(3, 3)
+        #     c.line(x_left + slot_width, y_top - slot_height, x_left + slot_width, y_top)
+        #     c.setDash()
+
+        # draw label content inside the slot. draw_label_block expects:
+        #   (canvas, order, x_left, y_top, slot_width, slot_height)
+        draw_label_block(c, order, x_left, y_top, slot_width, slot_height)
+
+        # show page at end of full page or at the very end (we'll call showPage when page full)
+        if index_in_page == (cols * rows - 1):
+            c.showPage()
+
+    # If the last page was partial (i.e., not exactly multiple of cols*rows) we must still finalize it.
+    # If the last operation did NOT end with showPage (i.e., last index not the last of page), call showPage.
+    if len(order_ids) % (cols * rows) != 0:
+        c.showPage()
+
+    conn.close()
+    c.save()
+    return pdf_path
 
 @app.get("/orders/{order_id}/label")
 def get_order_label(order_id: int):
@@ -1420,90 +1125,70 @@ def admin_dashboard(request: Request):
     )
 
 # ---- Data API for the dashboard table ----
-# @app.get("/admin/orders")
-# def admin_list_orders(
-#     request: Request,
-#     status: str = "pending",
-#     q: str = "",
-#     page: int = 1,
-#     page_size: int = 20
-# ):
-#     require_admin(request)
-
-#     offset = max(0, (page - 1) * page_size)
-#     # conn = sqlite3.connect(DB_PATH)
-#     # conn.row_factory = sqlite3.Row
-#     conn = get_conn()
-#     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-#     base = "SELECT * FROM orders"
-#     where = []
-#     params = []
-
-#     if status:
-#         where.append("status = %s")
-#         params.append(status)
-
-#     if q:
-#         where.append("(phone LIKE %s OR email LIKE %s OR name LIKE %s)")
-#         like = f"%{q}%"
-#         params.extend([like, like, like])
-
-#     where_clause = (" WHERE " + " AND ".join(where)) if where else ""
-#     order_clause = " ORDER BY id DESC"
-#     limit_clause = " LIMIT %s OFFSET %s"
-#     params.extend([page_size, offset])
-
-#     cursor.execute(base + where_clause + order_clause + limit_clause, params)
-#     rows = cursor.fetchall()
-
-#     # Count total for pagination
-#     count_sql = "SELECT COUNT(*) as count FROM orders" + where_clause
-#     cursor.execute(count_sql, params[:-2])  # exclude limit/offset
-#     total = cursor.fetchone()["count"]
-
-#     conn.close()
-
-#     return templates.TemplateResponse(
-#         "admin_orders_filtered.html",
-#         {
-#             "request": request,
-#             "orders": [dict(row) for row in rows],
-#             "total": total,
-#             "page": page,
-#             "page_size": page_size,
-#             "status": status,
-#             "q": q
-#         }
-#     )
 
 @app.get("/admin/orders")
 def admin_list_orders(request: Request, status: str = "pending", q: str = "", page: int = 1, page_size: int = 20):
     require_admin(request)
+
     offset = max(0, (page - 1) * page_size)
     start = offset
     end = offset + page_size - 1
 
     try:
-        query = supabase.table("orders")
+        # Start with select(*) so .eq/.range/.order exist on the returned builder
+        query = supabase.table("orders").select("*")
+
+        # Add filters AFTER select()
         if status:
             query = query.eq("status", status)
+
+        # (Optional) if you want server-side text filtering and your supabase client supports ilike:
+        # if q:
+        #     query = query.ilike("name", f"%{q}%")  # adjust field(s) as needed
+        # If ilike isn't available, we'll filter in-Python after fetching the page.
+
+        # Apply ordering & pagination
+        res = query.order("id", desc=True).range(start, end).execute()
+
+        # Unpack response safely
+        rows, err = _unpack_supabase_response(res)
+        if err:
+            logger.error("Supabase query error (list): %s", err)
+            raise HTTPException(status_code=500, detail=f"Query failed: {err}")
+
+        rows = rows or []
+
+        # If user supplied q and the client doesn't support ilike, do simple filter locally:
         if q:
-            # simple text search: you can filter on multiple fields
-            # keep example simple: filter name/phone/email contains q
-            # supabase-postgrest has `ilike` but supabase-py wrapper might need .filter
-            # To keep portable, fetch and then filter in python for the small page sizes.
-            pass
+            q_lower = q.lower()
+            def matches(r):
+                return (
+                    (r.get("phone") and q_lower in str(r.get("phone")).lower()) or
+                    (r.get("name") and q_lower in str(r.get("name")).lower())
+                )
+            rows = [r for r in rows if matches(r)]
 
-        res = query.select("*").order("id", desc=True).range(start, end).execute()
-        if res.error:
-            raise RuntimeError(res.error)
-        rows = res.data or []
+        # Get total count (safe, simple approach)
+        try:
+            count_query = supabase.table("orders").select("id")
+            if status:
+                count_query = count_query.eq("status", status)
+            count_res = count_query.execute()
+            count_data, count_err = _unpack_supabase_response(count_res)
+            if count_err:
+                logger.warning("Count query returned unexpected shape/error, falling back to page length: %s", count_err)
+                total = len(rows)
+            else:
+                total = len(count_data or [])
+        except Exception as ce:
+            logger.warning("Count query failed; using page length fallback: %s", ce)
+            total = len(rows)
 
-        # total count (simple approach): fetch total count by status
-        total_count_res = supabase.table("orders").select("id").eq("status", status).execute()
-        total = len(total_count_res.data or [])
+    except HTTPException:
+        # bubble up authentication / client errors
+        raise
     except Exception as e:
+        logger.exception("Unhandled error in admin_list_orders: %s", e)
         raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
     return templates.TemplateResponse(
@@ -1533,21 +1218,6 @@ def get_status_counts():
     return res
 
 # ---- Update status ----
-# @app.post("/admin/orders/{order_id}/status")
-# def admin_update_status(order_id: int, request: Request, status: str = Form(...)):
-#     require_admin(request)
-
-#     if status not in ("pending", "shipped", "cancelled"):
-#         raise HTTPException(status_code=400, detail="Invalid status")
-
-#     # conn = sqlite3.connect(DB_PATH)
-#     conn = get_conn()
-#     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-#     cursor.execute("UPDATE orders SET status = %s WHERE id = %s", (status, order_id))
-#     conn.commit()
-#     conn.close()
-
-#     return {"ok": True}
 
 @app.post("/admin/orders/{order_id}/status")
 def admin_update_status(order_id: int, request: Request, status: str = Form(...)):
@@ -1599,7 +1269,9 @@ async def admin_bulk_action(
 
     elif action == "generate_labels":
         conn.close()
-        pdf_path = generate_bulk_labels(order_ids)
+        # pdf_path = generate_bulk_labels(order_ids)
+        # return FileResponse(pdf_path, media_type="application/pdf", filename=os.path.basename(pdf_path))
+        pdf_path = generate_bulk_labels_a4(order_ids)
         return FileResponse(pdf_path, media_type="application/pdf", filename=os.path.basename(pdf_path))
 
     conn.close()
