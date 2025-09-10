@@ -55,6 +55,8 @@ from PIL import Image
 from reportlab.lib.units import mm
 import textwrap
 from typing import List
+import httpx
+import json
 
 # Set your Supabase credentials
 SUPABASE_URL = "https://zjgzqudobxmqgulyhgft.supabase.co"   # Replace with your project URL
@@ -62,6 +64,196 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 
 # Initialize Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# def _unpack_supabase_response(res):
+#     """
+#     Returns (data, error) where exactly one of them is non-None.
+#     Handles multiple response shapes from different supabase-py versions.
+#     """
+#     # 1) object-like: has .data and maybe .error
+#     if hasattr(res, "data") or hasattr(res, "error"):
+#         data = getattr(res, "data", None)
+#         err = getattr(res, "error", None)
+#         # some wrappers put error under res.error or res.status_code/res.message
+#         if err is None and hasattr(res, "status_code") and getattr(res, "status_code") not in (200, 201, None):
+#             # try to read message
+#             err = getattr(res, "message", None) or getattr(res, "error_message", None) or str(res)
+#         return data, err
+
+#     # 2) dict-like (e.g. {'data': ..., 'error': ...})
+#     if isinstance(res, dict):
+#         data = res.get("data") or res.get("body") or res.get("result")
+#         err = res.get("error") or res.get("message")
+#         return data, err
+
+#     # 3) some clients return (data, count) or other tuples — try common patterns
+#     if isinstance(res, (list, tuple)) and len(res) >= 1:
+#         # If it looks like (data, count) or similar, assume first element is data
+#         return res[0], None
+
+#     # Unknown shape — return None and an informative error
+#     # But include some introspection to help debugging
+#     try:
+#         info = {
+#             "type": str(type(res)),
+#             "repr": repr(res)[:200],
+#         }
+#         # attempt dir() if possible
+#         info["dir"] = sorted([d for d in dir(res) if not d.startswith("_")])[:60]
+#     except Exception:
+#         info = {"type": str(type(res))}
+#     return None, f"Unexpected Supabase response shape: {info}"
+
+
+
+# def _extract_public_url(pub_res):
+#     """
+#     Try to get a usable public URL from various shapes returned by get_public_url/create_signed_url/etc.
+#     Returns string URL or None.
+#     """
+#     if pub_res is None:
+#         return None
+#     # object-like with .get or .data
+#     if hasattr(pub_res, "get") and callable(getattr(pub_res, "get")):
+#         # dict-like
+#         for key in ("publicURL", "public_url", "url", "signedURL", "signed_url", "publicUrl"):
+#             if key in pub_res:
+#                 return pub_res[key]
+#         # some responses store under 'data'
+#         if "data" in pub_res and isinstance(pub_res["data"], dict):
+#             for key in ("publicURL", "public_url", "url", "signedURL"):
+#                 if key in pub_res["data"]:
+#                     return pub_res["data"][key]
+#     # object with attributes
+#     for attr in ("publicURL", "public_url", "url", "signedURL", "data"):
+#         if hasattr(pub_res, attr):
+#             val = getattr(pub_res, attr)
+#             # if data is nested
+#             if isinstance(val, dict):
+#                 for key in ("publicURL", "public_url", "url", "signedURL"):
+#                     if key in val:
+#                         return val[key]
+#             if isinstance(val, str):
+#                 return val
+#     # fallback: try str()
+#     s = str(pub_res)
+#     if "http" in s:
+#         # naive attempt to extract first http... substring
+#         import re
+#         m = re.search(r"https?://[^\s'\"]+", s)
+#         if m:
+#             return m.group(0)
+#     return None
+
+def _unpack_supabase_response(res):
+    """
+    Return (data, error) for many supabase client shapes, including httpx.Response.
+    """
+    # httpx.Response (requests-like)
+    if isinstance(res, httpx.Response):
+        # treat 2xx as success; try to parse JSON body
+        try:
+            body = res.json()
+        except Exception:
+            body = None
+        if 200 <= res.status_code < 300:
+            # success: body may contain {"data": ...} or be the raw result
+            if isinstance(body, dict) and "data" in body:
+                return body.get("data"), None
+            return body or None, None
+        else:
+            # non-2xx -> try to extract error
+            err = None
+            if isinstance(body, dict):
+                err = body.get("error") or body.get("message") or json.dumps(body)
+            else:
+                err = f"HTTP {res.status_code}: {res.text[:200]}"
+            return None, err
+
+    # object-like (many supabase-py versions)
+    if hasattr(res, "data") or hasattr(res, "error"):
+        data = getattr(res, "data", None)
+        err = getattr(res, "error", None)
+        if err is None and hasattr(res, "status_code") and getattr(res, "status_code") not in (200, 201, None):
+            err = getattr(res, "message", None) or getattr(res, "error_message", None) or str(res)
+        return data, err
+
+    # dict-like
+    if isinstance(res, dict):
+        data = res.get("data") or res.get("body") or res.get("result")
+        err = res.get("error") or res.get("message")
+        return data, err
+
+    # tuple/list-like
+    if isinstance(res, (list, tuple)) and len(res) >= 1:
+        return res[0], None
+
+    # unknown shape
+    try:
+        info = {"type": str(type(res)), "repr": repr(res)[:200], "dir": sorted([d for d in dir(res) if not d.startswith("_")])[:60]}
+    except Exception:
+        info = {"type": str(type(res))}
+    return None, f"Unexpected Supabase response shape: {info}"
+
+def _extract_public_url_from_response(pub_res):
+    """
+    Return a URL string from various shapes:
+      - httpx.Response with JSON body
+      - dict-like with data/publicURL
+      - object with attributes
+    """
+    if pub_res is None:
+        return None
+
+    # httpx.Response
+    if isinstance(pub_res, httpx.Response):
+        try:
+            body = pub_res.json()
+        except Exception:
+            body = None
+        # some responses contain {"publicURL": "..."} or {"data": {"publicURL": "..."}}
+        if isinstance(body, dict):
+            if "publicURL" in body:
+                return body["publicURL"]
+            if "public_url" in body:
+                return body["public_url"]
+            if "data" in body and isinstance(body["data"], dict):
+                for k in ("publicURL", "public_url", "signedURL", "url"):
+                    if k in body["data"]:
+                        return body["data"][k]
+        # fallback: search text
+        text = pub_res.text or ""
+        if "http" in text:
+            import re
+            m = re.search(r"https?://[^\s'\"]+", text)
+            if m:
+                return m.group(0)
+        return None
+
+    # dict-like or object with .get/.data
+    if isinstance(pub_res, dict):
+        for k in ("publicURL", "public_url", "url", "signedURL", "signed_url"):
+            if k in pub_res:
+                return pub_res[k]
+        if "data" in pub_res and isinstance(pub_res["data"], dict):
+            for k in ("publicURL", "public_url", "url", "signedURL"):
+                if k in pub_res["data"]:
+                    return pub_res["data"][k]
+
+    if hasattr(pub_res, "data"):
+        data = getattr(pub_res, "data")
+        if isinstance(data, dict):
+            for k in ("publicURL", "public_url", "url", "signedURL"):
+                if k in data:
+                    return data[k]
+    # last resort: str()
+    s = str(pub_res)
+    if "http" in s:
+        import re
+        m = re.search(r"https?://[^\s'\"]+", s)
+        if m:
+            return m.group(0)
+    return None
 
 app = FastAPI()
 
@@ -307,6 +499,102 @@ def validate_order_data(email, phone, name, addressLine1, pincode, city, state, 
         raise HTTPException(status_code=400, detail="Payment proof must be under 5MB")
 
 
+# @app.post("/orders")
+# async def create_order(
+#     email: str = Form(...),
+#     phone: str = Form(...),
+#     name: str = Form(...),
+#     addressLine1: str = Form(...),
+#     addressLine2: str = Form(""),
+#     landmark: str = Form(""),
+#     pincode: str = Form(...),
+#     city: str = Form(...),
+#     state: str = Form(...),
+#     country: str = Form("India"),
+#     quantity: int = Form(...),
+#     paymentProof: UploadFile = None
+# ):
+#     # Run validations
+#     print("Running validations")
+#     validate_order_data(email, phone, name, addressLine1, pincode, city, state, quantity, paymentProof)
+#     print("Validations completed")
+
+#     # Check if this phone or email already exists in DB
+#     # conn = sqlite3.connect("orders.db")
+#     conn = get_conn()
+#     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+#     cursor.execute(
+#         "SELECT id FROM orders WHERE status='pending' AND (email=%s OR phone=%s) LIMIT 1",
+#         (email, phone)
+#     )
+#     existing_order = cursor.fetchone()
+#     if existing_order:
+#         conn.close()
+#         raise HTTPException(
+#             status_code=400,
+#             detail="Your order is already submitted. We do not accept multiple orders."
+#         )
+
+#     # Store in DB
+#     # insert_query = """
+#     #     INSERT INTO orders (
+#     #         email, phone, name, addressLine1, addressLine2, landmark,
+#     #         pincode, city, state, country, quantity, created_at
+#     #     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+#     #     RETURNING id
+#     # """, (
+#     #     email, phone, name, addressLine1, addressLine2, landmark,
+#     #     pincode, city, state, country, quantity, 
+#     #     datetime.now().isoformat()
+#     # )
+#     cursor.execute("""
+#         INSERT INTO orders (
+#             email, phone, name, addressLine1, addressLine2, landmark,
+#             pincode, city, state, country, quantity, created_at
+#         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+#         RETURNING id
+#     """, (
+#         email, phone, name, addressLine1, addressLine2, landmark,
+#         pincode, city, state, country, quantity, 
+#         datetime.now().isoformat()
+#     ))
+#     # print(f" Insert query = {insert_query}")
+#     order_id = cursor.fetchone()["id"]
+#     conn.commit()
+
+#     # Save file
+#     # payment_proof_path = None
+#     # if paymentProof:
+#     #     filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{paymentProof.filename}"
+#     #     payment_proof_path = os.path.join(UPLOAD_FOLDER, filename)
+#     #     with open(payment_proof_path, "wb") as buffer:
+#     #         buffer.write(await paymentProof.read())
+#     payment_proof_url = None
+#     if paymentProof:
+#         filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{paymentProof.filename}"
+#         file_bytes = await paymentProof.read()
+
+#         # Upload to Supabase bucket
+#         supabase_path = f"uploads/{order_id}/{filename}"
+#         try:
+#             supabase.storage.from_(BUCKET).upload(
+#                 path=supabase_path,
+#                 file=file_bytes,
+#                 file_options={"content-type": paymentProof.content_type}
+#             )
+#             # Public URL (if bucket is public)
+#             payment_proof_url = supabase.storage.from_(BUCKET).get_public_url(supabase_path)
+#         except Exception as e:
+#             conn.close()
+#             raise HTTPException(status_code=500, detail=f"Failed to upload payment proof: {e}")
+
+#         # Update row with paymentProof path
+#         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+#         cursor.execute("UPDATE orders SET paymentProof=%s WHERE id=%s", (payment_proof_url, order_id))
+#         conn.commit()
+
+#     return {"message": "Order received successfully", "order_id": order_id, "paymentProof": payment_proof_url}
+
 @app.post("/orders")
 async def create_order(
     email: str = Form(...),
@@ -322,85 +610,130 @@ async def create_order(
     quantity: int = Form(...),
     paymentProof: UploadFile = None
 ):
-    # Run validations
-    print("Running validations")
+    # Validations (keep your existing check)
     validate_order_data(email, phone, name, addressLine1, pincode, city, state, quantity, paymentProof)
-    print("Validations completed")
 
-    # Check if this phone or email already exists in DB
-    # conn = sqlite3.connect("orders.db")
-    conn = get_conn()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cursor.execute(
-        "SELECT id FROM orders WHERE status='pending' AND (email=%s OR phone=%s) LIMIT 1",
-        (email, phone)
-    )
-    existing_order = cursor.fetchone()
-    if existing_order:
-        conn.close()
-        raise HTTPException(
-            status_code=400,
-            detail="Your order is already submitted. We do not accept multiple orders."
-        )
+    # ---- 1) check existing pending order by email or phone ----
+    try:
+        res_email = supabase.table("orders").select("id").eq("email", email).eq("status", "pending").limit(1).execute()
+        data_e, err_e = _unpack_supabase_response(res_email)
+        if err_e:
+            logger.error("Supabase error while checking email: %s", err_e)
+            raise HTTPException(status_code=500, detail=f"Supabase check failed: {err_e}")
+        if data_e and len(data_e) > 0:
+            raise HTTPException(status_code=400, detail="Your order is already submitted. We do not accept multiple orders.")
 
-    # Store in DB
-    # insert_query = """
-    #     INSERT INTO orders (
-    #         email, phone, name, addressLine1, addressLine2, landmark,
-    #         pincode, city, state, country, quantity, created_at
-    #     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    #     RETURNING id
-    # """, (
-    #     email, phone, name, addressLine1, addressLine2, landmark,
-    #     pincode, city, state, country, quantity, 
-    #     datetime.now().isoformat()
-    # )
-    cursor.execute("""
-        INSERT INTO orders (
-            email, phone, name, addressLine1, addressLine2, landmark,
-            pincode, city, state, country, quantity, created_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        RETURNING id
-    """, (
-        email, phone, name, addressLine1, addressLine2, landmark,
-        pincode, city, state, country, quantity, 
-        datetime.now().isoformat()
-    ))
-    # print(f" Insert query = {insert_query}")
-    order_id = cursor.fetchone()["id"]
-    conn.commit()
+        res_phone = supabase.table("orders").select("id").eq("phone", phone).eq("status", "pending").limit(1).execute()
+        data_p, err_p = _unpack_supabase_response(res_phone)
+        if err_p:
+            logger.error("Supabase error while checking phone: %s", err_p)
+            raise HTTPException(status_code=500, detail=f"Supabase check failed: {err_p}")
+        if data_p and len(data_p) > 0:
+            raise HTTPException(status_code=400, detail="Your order is already submitted. We do not accept multiple orders.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Unexpected error during existence check: %s", e)
+        raise HTTPException(status_code=500, detail=f"Supabase check failed: {e}")
 
-    # Save file
-    # payment_proof_path = None
-    # if paymentProof:
-    #     filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{paymentProof.filename}"
-    #     payment_proof_path = os.path.join(UPLOAD_FOLDER, filename)
-    #     with open(payment_proof_path, "wb") as buffer:
-    #         buffer.write(await paymentProof.read())
+    # ---- 2) insert order row ----
+    now_iso = datetime.now().isoformat()
+    payload = {
+        "email": email,
+        "phone": phone,
+        "name": name,
+        "addressline1": addressLine1,
+        "addressline2": addressLine2,
+        "landmark": landmark,
+        "pincode": pincode,
+        "city": city,
+        "state": state,
+        "country": country,
+        "quantity": quantity,
+        "status": "pending",
+        "created_at": now_iso,
+    }
+
+    try:
+        ins = supabase.table("orders").insert(payload).execute()
+        ins_data, ins_err = _unpack_supabase_response(ins)
+        if ins_err:
+            logger.error("Supabase insert error: %s", ins_err)
+            raise HTTPException(status_code=500, detail=f"Failed to create order: {ins_err}")
+        if not ins_data or len(ins_data) == 0:
+            logger.error("Supabase insert returned no data: %s", repr(ins))
+            raise HTTPException(status_code=500, detail="Failed to create order (no row returned).")
+        order_id = ins_data[0].get("id")
+        if order_id is None:
+            # attempt to read 'id' with varying keys
+            order_id = ins_data[0].get("order_id") or ins_data[0].get("ID") or ins_data[0].get("Id")
+        if order_id is None:
+            logger.error("Could not determine inserted order id from response: %s", ins_data[0])
+            raise HTTPException(status_code=500, detail="Failed to determine order id after insert.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Insert failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to create order: {e}")
+
+    # ---- 3) upload payment proof if present ----
     payment_proof_url = None
     if paymentProof:
-        filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{paymentProof.filename}"
-        file_bytes = await paymentProof.read()
-
-        # Upload to Supabase bucket
-        supabase_path = f"uploads/{order_id}/{filename}"
         try:
-            supabase.storage.from_(BUCKET).upload(
-                path=supabase_path,
-                file=file_bytes,
-                file_options={"content-type": paymentProof.content_type}
-            )
-            # Public URL (if bucket is public)
-            payment_proof_url = supabase.storage.from_(BUCKET).get_public_url(supabase_path)
+            filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{paymentProof.filename}"
+            file_bytes = await paymentProof.read()
+            supabase_path = f"uploads/{order_id}/{filename}"
+
+            # upload (some supabase clients raise on failure; some return dict)
+            upload_res = supabase.storage.from_(BUCKET).upload(path=supabase_path, file=file_bytes, file_options={"content-type": paymentProof.content_type})
+            # If upload returns an error shape, try to detect it:
+            _, upload_err = _unpack_supabase_response(upload_res)
+            if upload_err:
+                logger.error("Storage upload reported error: %s", upload_err)
+                raise HTTPException(status_code=500, detail=f"Failed to upload payment proof: {upload_err}")
+
+            # get public URL (various shapes)
+            pub_res = supabase.storage.from_(BUCKET).get_public_url(supabase_path)
+            payment_proof_url = _extract_public_url_from_response(pub_res)
+            if not payment_proof_url:
+                # fallback to signed url (1 hour)
+                try:
+                    signed_res = supabase.storage.from_(BUCKET).create_signed_url(supabase_path, 3600)
+                    signed_data, signed_err = _unpack_supabase_response(signed_res)
+                    if signed_err:
+                        logger.warning("Signed URL call returned error: %s, resp=%s", signed_err, repr(signed_res)[:400])
+                    # signed_data may be dict with {'signedURL': '...'} or httpx.Response - handle both
+                    if isinstance(signed_res, httpx.Response):
+                        payment_proof_url = _extract_public_url_from_response(signed_res)
+                    elif isinstance(signed_data, dict):
+                        payment_proof_url = signed_data.get("signedURL") or signed_data.get("signed_url") or signed_data.get("url")
+                    else:
+                        payment_proof_url = _extract_public_url_from_response(signed_res)
+                except Exception as se:
+                    logger.warning("Failed to create signed url fallback: %s", se)
+                    payment_proof_url = None
+
+            # if still missing, continue but log
+            if not payment_proof_url:
+                logger.warning("Could not extract public URL after upload. upload_res=%s pub_res=%s", repr(upload_res), repr(pub_res))
+
+            # update the row with paymentProof (if url found)
+            if payment_proof_url:
+                upd = supabase.table("orders").update({"paymentproof": payment_proof_url}).eq("id", order_id).execute()
+                upd_d, upd_err = _unpack_supabase_response(upd)
+                if upd_err:
+                    logger.error("Failed to update order with paymentProof: %s", upd_err)
+                    # not fatal for the order; but inform client
+                    raise HTTPException(status_code=500, detail=f"Uploaded payment proof but failed to record it: {upd_err}")
+
+        except HTTPException:
+            # bubble up intentionally thrown HTTPExceptions
+            raise
         except Exception as e:
-            conn.close()
+            logger.exception("Failed to upload payment proof or update row: %s", e)
             raise HTTPException(status_code=500, detail=f"Failed to upload payment proof: {e}")
 
-        # Update row with paymentProof path
-        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cursor.execute("UPDATE orders SET paymentProof=%s WHERE id=%s", (payment_proof_url, order_id))
-        conn.commit()
-
+    # success
     return {"message": "Order received successfully", "order_id": order_id, "paymentProof": payment_proof_url}
 
 # ---------- Label Generation ----------
@@ -806,14 +1139,39 @@ def draw_wrapped_text_slot(c, text, x, y, max_width, min_y, font_name="Helvetica
 
 
 
+# @app.get("/orders")
+# def get_orders():
+#     conn = get_conn()
+#     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+#     cursor.execute("SELECT * FROM orders ORDER BY created_at DESC")
+#     rows = cursor.fetchall()
+#     conn.close()
+#     return {"orders": rows}
+
 @app.get("/orders")
 def get_orders():
-    conn = get_conn()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cursor.execute("SELECT * FROM orders ORDER BY created_at DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    return {"orders": rows}
+    try:
+        res = supabase.table("orders").select("*").order("created_at", desc=True).execute()
+
+        data, err = _unpack_supabase_response(res)
+        if err:
+            # Log detailed debug info for troubleshooting, but do not leak secret content back to client
+            logger.error("Supabase returned error: %s; response type/dir=%s", err, getattr(res, "__class__", type(res)))
+            # provide generic error to client
+            raise HTTPException(status_code=500, detail=f"Supabase query failed: {err}")
+
+        # data might be None if table empty — normalize to []
+        return {"orders": data or []}
+
+    except HTTPException:
+        # re-raise HTTPExceptions thrown intentionally above
+        raise
+    except Exception as e:
+        # Unexpected exception — capture type and partial repr of `res` if in scope to help debugging
+        logger.exception("Unexpected exception while fetching orders: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch orders: {e}")
+
+
 # def generate_label_pdf(order):
 #     file_path = os.path.join(LABEL_FOLDER, f"label_{order['id']}.pdf")
 #     c = canvas.Canvas(file_path, pagesize=A6)
@@ -920,24 +1278,42 @@ def generate_bulk_labels(order_ids):
     return pdf_path
 
 # Endpoint to generate and download label for a single order
+# @app.get("/orders/{order_id}/label")
+# def get_order_label(order_id: int):
+#     conn = get_conn()
+#     # conn.row_factory = sqlite3.Row
+#     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+#     cursor.execute("SELECT * FROM orders WHERE id = %s", (order_id,))
+#     order_row  = cursor.fetchone()
+#     conn.close()
+
+#     if not order_row :
+#         raise HTTPException(status_code=404, detail="Order not found")
+
+#     # Convert Row to dict
+#     order = dict(order_row)
+
+#     # Generate PDF
+#     label_path = generate_label_pdf(order)
+#     return FileResponse(label_path, media_type="application/pdf", filename=f"label_{order_id}.pdf")
+
 @app.get("/orders/{order_id}/label")
 def get_order_label(order_id: int):
-    conn = get_conn()
-    # conn.row_factory = sqlite3.Row
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cursor.execute("SELECT * FROM orders WHERE id = %s", (order_id,))
-    order_row  = cursor.fetchone()
-    conn.close()
+    try:
+        r = supabase.table("orders").select("*").eq("id", order_id).execute()
+        if r.error:
+            raise RuntimeError(r.error)
+        if not r.data:
+            raise HTTPException(status_code=404, detail="Order not found")
+        order = r.data[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch order: {e}")
 
-    if not order_row :
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    # Convert Row to dict
-    order = dict(order_row)
-
-    # Generate PDF
     label_path = generate_label_pdf(order)
     return FileResponse(label_path, media_type="application/pdf", filename=f"label_{order_id}.pdf")
+
 
 # ============================================================
 #                    ADMIN DASHBOARD
@@ -1044,55 +1420,97 @@ def admin_dashboard(request: Request):
     )
 
 # ---- Data API for the dashboard table ----
+# @app.get("/admin/orders")
+# def admin_list_orders(
+#     request: Request,
+#     status: str = "pending",
+#     q: str = "",
+#     page: int = 1,
+#     page_size: int = 20
+# ):
+#     require_admin(request)
+
+#     offset = max(0, (page - 1) * page_size)
+#     # conn = sqlite3.connect(DB_PATH)
+#     # conn.row_factory = sqlite3.Row
+#     conn = get_conn()
+#     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+#     base = "SELECT * FROM orders"
+#     where = []
+#     params = []
+
+#     if status:
+#         where.append("status = %s")
+#         params.append(status)
+
+#     if q:
+#         where.append("(phone LIKE %s OR email LIKE %s OR name LIKE %s)")
+#         like = f"%{q}%"
+#         params.extend([like, like, like])
+
+#     where_clause = (" WHERE " + " AND ".join(where)) if where else ""
+#     order_clause = " ORDER BY id DESC"
+#     limit_clause = " LIMIT %s OFFSET %s"
+#     params.extend([page_size, offset])
+
+#     cursor.execute(base + where_clause + order_clause + limit_clause, params)
+#     rows = cursor.fetchall()
+
+#     # Count total for pagination
+#     count_sql = "SELECT COUNT(*) as count FROM orders" + where_clause
+#     cursor.execute(count_sql, params[:-2])  # exclude limit/offset
+#     total = cursor.fetchone()["count"]
+
+#     conn.close()
+
+#     return templates.TemplateResponse(
+#         "admin_orders_filtered.html",
+#         {
+#             "request": request,
+#             "orders": [dict(row) for row in rows],
+#             "total": total,
+#             "page": page,
+#             "page_size": page_size,
+#             "status": status,
+#             "q": q
+#         }
+#     )
+
 @app.get("/admin/orders")
-def admin_list_orders(
-    request: Request,
-    status: str = "pending",
-    q: str = "",
-    page: int = 1,
-    page_size: int = 20
-):
+def admin_list_orders(request: Request, status: str = "pending", q: str = "", page: int = 1, page_size: int = 20):
     require_admin(request)
-
     offset = max(0, (page - 1) * page_size)
-    # conn = sqlite3.connect(DB_PATH)
-    # conn.row_factory = sqlite3.Row
-    conn = get_conn()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    start = offset
+    end = offset + page_size - 1
 
-    base = "SELECT * FROM orders"
-    where = []
-    params = []
+    try:
+        query = supabase.table("orders")
+        if status:
+            query = query.eq("status", status)
+        if q:
+            # simple text search: you can filter on multiple fields
+            # keep example simple: filter name/phone/email contains q
+            # supabase-postgrest has `ilike` but supabase-py wrapper might need .filter
+            # To keep portable, fetch and then filter in python for the small page sizes.
+            pass
 
-    if status:
-        where.append("status = %s")
-        params.append(status)
+        res = query.select("*").order("id", desc=True).range(start, end).execute()
+        if res.error:
+            raise RuntimeError(res.error)
+        rows = res.data or []
 
-    if q:
-        where.append("(phone LIKE %s OR email LIKE %s OR name LIKE %s)")
-        like = f"%{q}%"
-        params.extend([like, like, like])
-
-    where_clause = (" WHERE " + " AND ".join(where)) if where else ""
-    order_clause = " ORDER BY id DESC"
-    limit_clause = " LIMIT %s OFFSET %s"
-    params.extend([page_size, offset])
-
-    cursor.execute(base + where_clause + order_clause + limit_clause, params)
-    rows = cursor.fetchall()
-
-    # Count total for pagination
-    count_sql = "SELECT COUNT(*) as count FROM orders" + where_clause
-    cursor.execute(count_sql, params[:-2])  # exclude limit/offset
-    total = cursor.fetchone()["count"]
-
-    conn.close()
+        # total count (simple approach): fetch total count by status
+        total_count_res = supabase.table("orders").select("id").eq("status", status).execute()
+        total = len(total_count_res.data or [])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
     return templates.TemplateResponse(
         "admin_orders_filtered.html",
         {
             "request": request,
-            "orders": [dict(row) for row in rows],
+            "orders": [dict(r) for r in rows],
             "total": total,
             "page": page,
             "page_size": page_size,
@@ -1100,6 +1518,7 @@ def admin_list_orders(
             "q": q
         }
     )
+
 
 def get_status_counts():
     conn = get_conn()
@@ -1114,21 +1533,35 @@ def get_status_counts():
     return res
 
 # ---- Update status ----
+# @app.post("/admin/orders/{order_id}/status")
+# def admin_update_status(order_id: int, request: Request, status: str = Form(...)):
+#     require_admin(request)
+
+#     if status not in ("pending", "shipped", "cancelled"):
+#         raise HTTPException(status_code=400, detail="Invalid status")
+
+#     # conn = sqlite3.connect(DB_PATH)
+#     conn = get_conn()
+#     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+#     cursor.execute("UPDATE orders SET status = %s WHERE id = %s", (status, order_id))
+#     conn.commit()
+#     conn.close()
+
+#     return {"ok": True}
+
 @app.post("/admin/orders/{order_id}/status")
 def admin_update_status(order_id: int, request: Request, status: str = Form(...)):
     require_admin(request)
-
     if status not in ("pending", "shipped", "cancelled"):
         raise HTTPException(status_code=400, detail="Invalid status")
-
-    # conn = sqlite3.connect(DB_PATH)
-    conn = get_conn()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cursor.execute("UPDATE orders SET status = %s WHERE id = %s", (status, order_id))
-    conn.commit()
-    conn.close()
-
+    try:
+        res = supabase.table("orders").update({"status": status}).eq("id", order_id).execute()
+        if res.error:
+            raise RuntimeError(res.error)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Update failed: {e}")
     return {"ok": True}
+
 
 # Optional: quick health ping
 @app.get("/admin/ping")
@@ -1208,6 +1641,15 @@ async def get_order_screenshot(order_id: str):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/_supabase_dbg")
+def _supabase_dbg():
+    res = supabase.table("orders").select("*").limit(1).execute()
+    return {
+        "type": str(type(res)),
+        "repr": repr(res)[:200],
+        "dir_sample": sorted([d for d in dir(res) if not d.startswith("_")])[:60]
+    }
 
 
 if __name__ == "__main__":
