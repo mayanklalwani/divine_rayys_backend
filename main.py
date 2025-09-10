@@ -8,7 +8,17 @@ from reportlab.lib.units import mm
 from reportlab.lib.utils import simpleSplit
 import socket
 import os
+import uvicorn
+import logging
 from urllib.parse import quote_plus, urlparse, urlunparse
+
+logging.basicConfig(
+    level=getattr(logging, "INFO", logging.INFO),
+    format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+logger = logging.getLogger(__name__)
 
 BUCKET = "divinerayysdiwali2025"
 
@@ -88,17 +98,106 @@ HOST = os.getenv("host", "db.zjgzqudobxmqgulyhgft.supabase.co")
 PORT = os.getenv("port", "5432")
 DBNAME = os.getenv("dbname", "postgres")
 
+# def get_conn():
+#     # conn = sqlite3.connect(DB_PATH)
+#     # conn.row_factory = sqlite3.Row
+#     conn = psycopg2.connect(
+#         user=USER,
+#         password=PASSWORD,
+#         host=HOST,
+#         port=PORT,
+#         dbname=DBNAME
+#     )
+#     return conn
+
 def get_conn():
-    # conn = sqlite3.connect(DB_PATH)
-    # conn.row_factory = sqlite3.Row
-    conn = psycopg2.connect(
-        user=USER,
-        password=PASSWORD,
-        host=HOST,
-        port=PORT,
-        dbname=DBNAME
-    )
-    return conn
+    """
+    IPv4-first DB connector:
+     - Try all IPv4 addresses for HOST first (connect to IPv4 literal).
+     - If IPv4 attempts fail, try connecting using the hostname (system default).
+     - Finally try IPv6 addresses (explicit) before giving up.
+    """
+    connect_timeout = int(os.getenv("DB_CONNECT_TIMEOUT", "10"))
+
+    user = USER
+    password = PASSWORD
+    host = HOST
+    port = int(PORT or 5432)
+    dbname = DBNAME
+
+    last_exc = None
+
+    # 1) Resolve IPv4 addresses and try them first
+    try:
+        infos4 = socket.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        infos4 = []
+        logger.error("IPv4 resolution failed for %s: %s", host, e)
+
+    if infos4:
+        for info in infos4:
+            ipv4 = info[4][0]
+            try:
+                logger.info("Attempting connect to IPv4 %s:%s", ipv4, port)
+                return psycopg2.connect(
+                    user=user,
+                    password=password,
+                    host=ipv4,
+                    port=str(port),
+                    dbname=dbname,
+                    connect_timeout=connect_timeout,
+                    sslmode="require",
+                )
+            except Exception as e:
+                logger.warning("Connect to IPv4 %s failed: %s", ipv4, e)
+                last_exc = e
+
+    # 2) Fall back to hostname (let libpq choose; may try IPv6)
+    try:
+        logger.info("Attempting connect to hostname %s:%s", host, port)
+        return psycopg2.connect(
+            user=user,
+            password=password,
+            host=host,
+            port=str(port),
+            dbname=dbname,
+            connect_timeout=connect_timeout,
+            sslmode="require",
+        )
+    except Exception as e:
+        logger.warning("Connect to hostname %s failed: %s", host, e)
+        last_exc = e
+
+    # 3) Try IPv6 explicit addresses (useful if IPv4 attempts failed but IPv6 works)
+    try:
+        infos6 = socket.getaddrinfo(host, port, family=socket.AF_INET6, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        infos6 = []
+        logger.debug("IPv6 resolution failed for %s: %s", host, e)
+
+    if infos6:
+        for info in infos6:
+            ipv6 = info[4][0]
+            try:
+                logger.info("Attempting connect to IPv6 %s:%s", ipv6, port)
+                return psycopg2.connect(
+                    user=user,
+                    password=password,
+                    host=ipv6,
+                    port=str(port),
+                    dbname=dbname,
+                    connect_timeout=connect_timeout,
+                    sslmode="require",
+                )
+            except Exception as e:
+                logger.warning("Connect to IPv6 %s failed: %s", ipv6, e)
+                last_exc = e
+
+    # Nothing worked — raise informative error
+    raise RuntimeError(
+        f"Failed to connect to Postgres (host={host!r}, port={port}). "
+        "Tried IPv4 addresses, hostname, and IPv6 addresses. See logs for details."
+    ) from last_exc
 
 # def get_conn():
 #     """
@@ -1106,3 +1205,22 @@ async def get_order_screenshot(order_id: str):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+if __name__ == "__main__":
+    # Config from env (sane defaults)
+    HOST = os.getenv("HOST", "0.0.0.0")
+    PORT = int(os.getenv("PORT", "8000"))
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "info").lower()  # debug/info/warning/error
+    # DEV_RELOAD can be "1", "true", "yes" to enable reload; default True for local dev
+    DEV_RELOAD = os.getenv("DEV_RELOAD", "true").lower() in ("1", "true", "yes")
+
+    # Note: reload=True is for development only (auto-restarts on code changes).
+    # Do NOT enable reload on production hosts (Render, etc.) — they typically run uvicorn themselves.
+    uvicorn.run(
+        "main:app",
+        host=HOST,
+        port=PORT,
+        reload=DEV_RELOAD,
+        log_level=LOG_LEVEL,
+    )
