@@ -58,6 +58,7 @@ import textwrap
 from typing import List
 import httpx
 import json
+import types
 
 # Set your Supabase credentials
 SUPABASE_URL = "https://zjgzqudobxmqgulyhgft.supabase.co"   # Replace with your project URL
@@ -66,30 +67,126 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 # Initialize Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# def _unpack_supabase_response(res):
+#     """
+#     Return (data, error) for many supabase client shapes, including httpx.Response.
+#     """
+#     # httpx.Response (requests-like)
+#     if isinstance(res, httpx.Response):
+#         # treat 2xx as success; try to parse JSON body
+#         try:
+#             body = res.json()
+#         except Exception:
+#             body = None
+#         if 200 <= res.status_code < 300:
+#             # success: body may contain {"data": ...} or be the raw result
+#             if isinstance(body, dict) and "data" in body:
+#                 return body.get("data"), None
+#             return body or None, None
+#         else:
+#             # non-2xx -> try to extract error
+#             err = None
+#             if isinstance(body, dict):
+#                 err = body.get("error") or body.get("message") or json.dumps(body)
+#             else:
+#                 err = f"HTTP {res.status_code}: {res.text[:200]}"
+#             return None, err
+
+#     # object-like (many supabase-py versions)
+#     if hasattr(res, "data") or hasattr(res, "error"):
+#         data = getattr(res, "data", None)
+#         err = getattr(res, "error", None)
+#         if err is None and hasattr(res, "status_code") and getattr(res, "status_code") not in (200, 201, None):
+#             err = getattr(res, "message", None) or getattr(res, "error_message", None) or str(res)
+#         return data, err
+
+#     # dict-like
+#     if isinstance(res, dict):
+#         data = res.get("data") or res.get("body") or res.get("result")
+#         err = res.get("error") or res.get("message")
+#         return data, err
+
+#     # tuple/list-like
+#     if isinstance(res, (list, tuple)) and len(res) >= 1:
+#         return res[0], None
+
+#     # unknown shape
+#     try:
+#         info = {"type": str(type(res)), "repr": repr(res)[:200], "dir": sorted([d for d in dir(res) if not d.startswith("_")])[:60]}
+#     except Exception:
+#         info = {"type": str(type(res))}
+#     return None, f"Unexpected Supabase response shape: {info}"
+
+def _parse_iso_datetime(val):
+    """
+    Convert ISO-like timestamp strings to datetime if possible.
+    Handles "YYYY-MM-DDTHH:MM:SS", with optional fractional seconds and trailing 'Z' or timezone.
+    If parsing fails or val is already a datetime, returns val unchanged.
+    """
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val
+    if not isinstance(val, str):
+        return val
+    s = val
+    # Convert trailing Z -> +00:00 for fromisoformat
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    # If there is a space between date/time instead of T, replace with T
+    if " " in s and "T" not in s:
+        s = s.replace(" ", "T")
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        # Try a few common formats as fallback
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(val, fmt)
+            except Exception:
+                continue
+    # give up and return original string
+    return val
+
 def _unpack_supabase_response(res):
     """
-    Return (data, error) for many supabase client shapes, including httpx.Response.
+    Return (data, error). Handles:
+      - httpx.Response
+      - objects with .data/.error
+      - dict-like
+      - tuple/list-like
+      - storage UploadResponse-like objects (path/full_path)
     """
     # httpx.Response (requests-like)
     if isinstance(res, httpx.Response):
-        # treat 2xx as success; try to parse JSON body
         try:
             body = res.json()
         except Exception:
             body = None
         if 200 <= res.status_code < 300:
-            # success: body may contain {"data": ...} or be the raw result
             if isinstance(body, dict) and "data" in body:
                 return body.get("data"), None
             return body or None, None
         else:
-            # non-2xx -> try to extract error
-            err = None
             if isinstance(body, dict):
                 err = body.get("error") or body.get("message") or json.dumps(body)
             else:
                 err = f"HTTP {res.status_code}: {res.text[:200]}"
             return None, err
+
+    # storage UploadResponse-like objects (storage3.types.UploadResponse)
+    # Many such objects expose attributes: path, full_path, fullPath, etc.
+    for attr_name in ("path", "full_path", "fullPath", "fullPath"):
+        if hasattr(res, attr_name):
+            # Build a simple dict representing the upload result
+            try:
+                path_val = getattr(res, "path", None)
+                full_path_val = getattr(res, "full_path", None) or getattr(res, "fullPath", None) or getattr(res, "full_path", None)
+            except Exception:
+                path_val = None
+                full_path_val = None
+            data = {"path": path_val, "full_path": full_path_val}
+            return data, None
 
     # object-like (many supabase-py versions)
     if hasattr(res, "data") or hasattr(res, "error"):
@@ -109,7 +206,7 @@ def _unpack_supabase_response(res):
     if isinstance(res, (list, tuple)) and len(res) >= 1:
         return res[0], None
 
-    # unknown shape
+    # unknown shape -> useful debug info
     try:
         info = {"type": str(type(res)), "repr": repr(res)[:200], "dir": sorted([d for d in dir(res) if not d.startswith("_")])[:60]}
     except Exception:
@@ -417,14 +514,28 @@ async def create_order(
             # upload (some supabase clients raise on failure; some return dict)
             upload_res = supabase.storage.from_(BUCKET).upload(path=supabase_path, file=file_bytes, file_options={"content-type": paymentProof.content_type})
             # If upload returns an error shape, try to detect it:
-            _, upload_err = _unpack_supabase_response(upload_res)
-            if upload_err:
-                logger.error("Storage upload reported error: %s", upload_err)
-                raise HTTPException(status_code=500, detail=f"Failed to upload payment proof: {upload_err}")
+            up_data, up_err = _unpack_supabase_response(upload_res)
+            # If _unpack reported an error, fail. Otherwise proceed.
+            if up_err:
+                logger.error("Storage upload reported error: %s ; upload_res_repr=%s", up_err, repr(upload_res)[:400])
+                raise HTTPException(status_code=500, detail=f"Failed to upload payment proof: {up_err}")
 
-            # get public URL (various shapes)
-            pub_res = supabase.storage.from_(BUCKET).get_public_url(supabase_path)
-            payment_proof_url = _extract_public_url_from_response(pub_res)
+            # If upload returned data with full_path/path, try to construct public URL
+            uploaded_path = None
+            if isinstance(up_data, dict):
+                uploaded_path = up_data.get("full_path") or up_data.get("fullPath") or up_data.get("path")
+            # Some clients returned the data directly (e.g. dict) or None; fallback to known supabase_path
+            if not uploaded_path:
+                uploaded_path = supabase_path  # fallback
+
+            try:
+                # get public URL (various shapes)
+                pub_res = supabase.storage.from_(BUCKET).get_public_url(supabase_path)
+                payment_proof_url = _extract_public_url_from_response(pub_res)
+            except Exception as e:
+                logger.debug("get_public_url call failed: %s", e)
+                payment_proof_url = None
+
             if not payment_proof_url:
                 # fallback to signed url (1 hour)
                 try:
@@ -1065,64 +1176,242 @@ def admin_logout(request: Request):
     return resp
 
 # ---- Dashboard page ----
+# @app.get("/admin", response_class=HTMLResponse)
+# def admin_dashboard(request: Request):
+#     if not request.session.get("admin"):
+#         return RedirectResponse(url="/admin/login", status_code=302)
+#     # return templates.TemplateResponse("admin_orders.html", {"request": request})
+#     conn = get_conn()
+#     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+#     cursor.execute("SELECT COUNT(*) as count, COALESCE(SUM(quantity),0) as qty FROM orders WHERE status='pending'")
+#     row = cursor.fetchone()
+#     pending_count, pending_qty = row["count"], row["qty"]
+
+#     cursor.execute("SELECT COUNT(*) as count, COALESCE(SUM(quantity),0) as qty FROM orders WHERE status='shipped'")
+#     row = cursor.fetchone()
+#     shipped_count, shipped_qty = row["count"], row["qty"]
+
+#     cursor.execute("SELECT COUNT(*) as count, COALESCE(SUM(quantity),0) as qty FROM orders WHERE status='cancelled'")
+#     row = cursor.fetchone()
+#     cancelled_count, cancelled_qty = row["count"], row["qty"]
+
+#     cursor.execute("SELECT COUNT(*) as count, COALESCE(SUM(quantity),0) as qty FROM orders")
+#     row = cursor.fetchone()
+#     total_count, total_qty = row["count"], row["qty"]
+
+#     cursor.execute("SELECT * FROM orders WHERE status='pending'")
+#     orders = cursor.fetchall()
+
+#     conn.close()
+
+#     counts = {
+#         "pending": pending_count,
+#         "shipped": shipped_count,
+#         "cancelled": cancelled_count,
+#     }
+
+#     stats = {
+#         "orders": {
+#             "pending": pending_count,
+#             "shipped": shipped_count,
+#             "cancelled": cancelled_count,
+#             "all": total_count,
+#         },
+#         "qty": {
+#             "pending": pending_qty,
+#             "shipped": shipped_qty,
+#             "cancelled": cancelled_qty,
+#             "all": total_qty,
+#         }
+#     }
+
+#     return templates.TemplateResponse(
+#         "admin_orders.html",
+#         {
+#             "request": request,
+#             "stats": stats,
+#             "orders": orders
+#         }
+#     )
+
+# @app.get("/admin", response_class=HTMLResponse)
+# def admin_dashboard(request: Request):
+#     # auth
+#     if not request.session.get("admin"):
+#         return RedirectResponse(url="/admin/login", status_code=302)
+
+#     try:
+#         # --- pending counts/qty ---
+#         # Try to get counts & sums via supabase. Some clients support .select("id", count="exact")
+#         # but we handle the common shapes and fallback to separate queries.
+#         def safe_count_and_sum(status_val=None):
+#             """
+#             Returns (count:int, qty:int) for given status (None => all)
+#             """
+#             try:
+#                 query = supabase.table("orders")
+#                 # Use explicit select to possibly get a count via returned rows
+#                 if status_val:
+#                     query = query.select("id, quantity").eq("status", status_val)
+#                 else:
+#                     query = query.select("id, quantity")
+#                 res = query.execute()
+#                 data, err = _unpack_supabase_response(res)
+#                 if err:
+#                     # fallback: try sql via rpc or return zeros
+#                     logger.warning("Count query returned error for status=%s: %s", status_val, err)
+#                     return 0, 0
+#                 rows = data or []
+#                 cnt = len(rows)
+#                 qty = sum((int(r.get("quantity") or 0) for r in rows))
+#                 return cnt, qty
+#             except Exception as e:
+#                 logger.exception("safe_count_and_sum failed for status=%s: %s", status_val, e)
+#                 return 0, 0
+
+#         pending_count, pending_qty = safe_count_and_sum("pending")
+#         shipped_count, shipped_qty = safe_count_and_sum("shipped")
+#         cancelled_count, cancelled_qty = safe_count_and_sum("cancelled")
+#         total_count, total_qty = safe_count_and_sum(None)
+
+#         # --- fetch pending orders (limited to a reasonable number, e.g. 500) ---
+#         try:
+#             res_orders = supabase.table("orders").select("*").eq("status", "pending").order("created_at", desc=True).limit(500).execute()
+#             orders_data, orders_err = _unpack_supabase_response(res_orders)
+#             if orders_err:
+#                 logger.error("Failed to fetch pending orders: %s", orders_err)
+#                 orders = []
+#             else:
+#                 orders = orders_data or []
+#         except Exception as e:
+#             logger.exception("Error fetching pending orders: %s", e)
+#             orders = []
+
+#         # ensure rows are simple dicts for the template
+#         orders = [dict(o) for o in orders]
+
+#         stats = {
+#             "orders": {
+#                 "pending": pending_count,
+#                 "shipped": shipped_count,
+#                 "cancelled": cancelled_count,
+#                 "all": total_count,
+#             },
+#             "qty": {
+#                 "pending": pending_qty,
+#                 "shipped": shipped_qty,
+#                 "cancelled": cancelled_qty,
+#                 "all": total_qty,
+#             }
+#         }
+
+#         return templates.TemplateResponse(
+#             "admin_orders.html",
+#             {
+#                 "request": request,
+#                 "stats": stats,
+#                 "orders": orders
+#             }
+#         )
+
+#     except Exception as e:
+#         logger.exception("Unhandled error in admin_dashboard: %s", e)
+#         # show a simple error page / redirect to login
+#         raise HTTPException(status_code=500, detail=f"Failed to load admin dashboard: {e}")
+
 @app.get("/admin", response_class=HTMLResponse)
 def admin_dashboard(request: Request):
+    # auth
     if not request.session.get("admin"):
         return RedirectResponse(url="/admin/login", status_code=302)
-    # return templates.TemplateResponse("admin_orders.html", {"request": request})
-    conn = get_conn()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-    cursor.execute("SELECT COUNT(*) as count, COALESCE(SUM(quantity),0) as qty FROM orders WHERE status='pending'")
-    row = cursor.fetchone()
-    pending_count, pending_qty = row["count"], row["qty"]
+    try:
+        def safe_count_and_sum(status_val=None):
+            try:
+                query = supabase.table("orders")
+                if status_val:
+                    query = query.select("id, quantity").eq("status", status_val)
+                else:
+                    query = query.select("id, quantity")
+                res = query.execute()
+                data, err = _unpack_supabase_response(res)
+                if err:
+                    logger.warning("Count query returned error for status=%s: %s", status_val, err)
+                    return 0, 0
+                rows = data or []
+                cnt = len(rows)
+                qty = sum((int(r.get("quantity") or 0) for r in rows))
+                return cnt, qty
+            except Exception as e:
+                logger.exception("safe_count_and_sum failed for status=%s: %s", status_val, e)
+                return 0, 0
 
-    cursor.execute("SELECT COUNT(*) as count, COALESCE(SUM(quantity),0) as qty FROM orders WHERE status='shipped'")
-    row = cursor.fetchone()
-    shipped_count, shipped_qty = row["count"], row["qty"]
+        pending_count, pending_qty = safe_count_and_sum("pending")
+        shipped_count, shipped_qty = safe_count_and_sum("shipped")
+        cancelled_count, cancelled_qty = safe_count_and_sum("cancelled")
+        total_count, total_qty = safe_count_and_sum(None)
 
-    cursor.execute("SELECT COUNT(*) as count, COALESCE(SUM(quantity),0) as qty FROM orders WHERE status='cancelled'")
-    row = cursor.fetchone()
-    cancelled_count, cancelled_qty = row["count"], row["qty"]
+        # fetch pending orders
+        try:
+            res_orders = supabase.table("orders").select("*").eq("status", "pending").order("created_at", desc=True).limit(500).execute()
+            orders_data, orders_err = _unpack_supabase_response(res_orders)
+            if orders_err:
+                logger.error("Failed to fetch pending orders: %s", orders_err)
+                orders = []
+            else:
+                orders = orders_data or []
+        except Exception as e:
+            logger.exception("Error fetching pending orders: %s", e)
+            orders = []
 
-    cursor.execute("SELECT COUNT(*) as count, COALESCE(SUM(quantity),0) as qty FROM orders")
-    row = cursor.fetchone()
-    total_count, total_qty = row["count"], row["qty"]
+        # Normalize orders: convert created_at (and other ISO timestamps if present) to datetime
+        normalized = []
+        for o in orders:
+            try:
+                # ensure it's a dict
+                od = dict(o)
+                for key in ("created_at", "updated_at", "createdAt", "updatedAt"):
+                    if key in od and od[key]:
+                        od[key] = _parse_iso_datetime(od[key])
+                normalized.append(od)
+            except Exception as e:
+                logger.warning("Failed to normalize order row: %s. Row repr: %s", e, repr(o)[:400])
+                # still include raw row so UI can show something
+                try:
+                    normalized.append(dict(o))
+                except Exception:
+                    normalized.append(o)
 
-    cursor.execute("SELECT * FROM orders WHERE status='pending'")
-    orders = cursor.fetchall()
+        orders = normalized
 
-    conn.close()
-
-    counts = {
-        "pending": pending_count,
-        "shipped": shipped_count,
-        "cancelled": cancelled_count,
-    }
-
-    stats = {
-        "orders": {
-            "pending": pending_count,
-            "shipped": shipped_count,
-            "cancelled": cancelled_count,
-            "all": total_count,
-        },
-        "qty": {
-            "pending": pending_qty,
-            "shipped": shipped_qty,
-            "cancelled": cancelled_qty,
-            "all": total_qty,
+        stats = {
+            "orders": {
+                "pending": pending_count,
+                "shipped": shipped_count,
+                "cancelled": cancelled_count,
+                "all": total_count,
+            },
+            "qty": {
+                "pending": pending_qty,
+                "shipped": shipped_qty,
+                "cancelled": cancelled_qty,
+                "all": total_qty,
+            }
         }
-    }
 
-    return templates.TemplateResponse(
-        "admin_orders.html",
-        {
-            "request": request,
-            "stats": stats,
-            "orders": orders
-        }
-    )
+        return templates.TemplateResponse(
+            "admin_orders.html",
+            {
+                "request": request,
+                "stats": stats,
+                "orders": orders
+            }
+        )
+
+    except Exception as e:
+        logger.exception("Unhandled error in admin_dashboard: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to load admin dashboard: {e}")
 
 # ---- Data API for the dashboard table ----
 
