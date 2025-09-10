@@ -11,6 +11,7 @@ import os
 import uvicorn
 import logging
 from urllib.parse import quote_plus, urlparse, urlunparse
+from app.routes.debug import router as debug_router
 
 logging.basicConfig(
     level=getattr(logging, "INFO", logging.INFO),
@@ -80,6 +81,8 @@ app.add_middleware(
 # Static & Templates
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+
+app.include_router(debug_router)
 
 # Ensure uploads folder exists
 UPLOAD_FOLDER = "uploads"
