@@ -117,6 +117,39 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 #         info = {"type": str(type(res))}
 #     return None, f"Unexpected Supabase response shape: {info}"
 
+# -------------------------
+# Helper: fetch orders by ids preserving input order
+# -------------------------
+def _fetch_orders_by_ids(order_ids):
+    """
+    Return list of order dicts in the same order as order_ids.
+    Uses a single supabase query to fetch all rows then reorders to match the input ids.
+    """
+    if not order_ids:
+        return []
+
+    try:
+        # supabase-py supports .in_("id", order_ids)
+        res = supabase.table("orders").select("*").in_("id", order_ids).execute()
+        data, err = _unpack_supabase_response(res)
+        if err:
+            logger.error("Failed to fetch orders by ids: %s", err)
+            return []
+        rows = data or []
+        # Map by id for ordering
+        by_id = {int(r.get("id")): dict(r) for r in rows}
+        ordered = []
+        for oid in order_ids:
+            try:
+                ordered.append(by_id[int(oid)])
+            except Exception:
+                # if a particular id missing, skip
+                logger.debug("Order id %s not found in fetched rows", oid)
+        return ordered
+    except Exception as e:
+        logger.exception("Exception in _fetch_orders_by_ids: %s", e)
+        return []
+
 def _parse_iso_datetime(val):
     """
     Convert ISO-like timestamp strings to datetime if possible.
@@ -920,10 +953,72 @@ def generate_label_pdf(order):
     c.save()
     return file_path
 
+# def generate_bulk_labels(order_ids):
+#     """
+#     Generates a PDF with two half-width labels per A6 page (left and right).
+#     If odd number of orders, the final page will contain the last label in the left slot.
+#     """
+#     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+#     pdf_path = os.path.join(LABEL_FOLDER, f"labels_bulk_{ts}.pdf")
+#     c = canvas.Canvas(pdf_path, pagesize=A6)
+#     width, height = A6
+
+#     # margins / gutter
+#     margin = 8 * mm
+#     gutter = 4 * mm  # space between two half-width labels
+
+#     # compute slot sizes
+#     usable_width = width - 2 * margin - gutter
+#     slot_width = usable_width / 2.0
+#     slot_height = height - 2 * margin
+
+#     conn = get_conn()
+#     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+#     # walk in steps of 2 and place two labels per page
+#     i = 0
+#     n = len(order_ids)
+#     while i < n:
+#         # New A6 page for every pair
+#         # left slot (always)
+#         oid_left = order_ids[i]
+#         cur.execute("SELECT * FROM orders WHERE id=%s", (oid_left,))
+#         left_row = cur.fetchone()
+#         if left_row:
+#             x_left = margin
+#             y_top = height - margin
+#             draw_label_block(c, dict(left_row), x_left, y_top, slot_width, slot_height)
+
+#         # right slot (if exists)
+#         if i + 1 < n:
+#             oid_right = order_ids[i + 1]
+#             cur.execute("SELECT * FROM orders WHERE id=%s", (oid_right,))
+#             right_row = cur.fetchone()
+#             if right_row:
+#                 x_right = margin + slot_width + gutter
+#                 y_top = height - margin
+#                 draw_label_block(c, dict(right_row), x_right, y_top, slot_width, slot_height)
+
+#         # --- add dashed vertical line between slots ---
+#         divider_x = margin + slot_width + (gutter / 2.0)
+#         c.setDash(3, 3)  # dash pattern: 3 on, 3 off
+#         c.line(divider_x, margin, divider_x, height - margin)
+#         c.setDash()  # reset to solid
+
+#         c.showPage()
+#         i += 2
+
+#     conn.close()
+#     c.save()
+#     return pdf_path
+
+# -------------------------
+# generate_bulk_labels (A6 two-per-page) using supabase
+# -------------------------
 def generate_bulk_labels(order_ids):
     """
     Generates a PDF with two half-width labels per A6 page (left and right).
-    If odd number of orders, the final page will contain the last label in the left slot.
+    Fetches order rows from Supabase in one call.
     """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     pdf_path = os.path.join(LABEL_FOLDER, f"labels_bulk_{ts}.pdf")
@@ -939,43 +1034,35 @@ def generate_bulk_labels(order_ids):
     slot_width = usable_width / 2.0
     slot_height = height - 2 * margin
 
-    conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    # Fetch rows from Supabase once and preserve order
+    orders = _fetch_orders_by_ids(order_ids)
 
-    # walk in steps of 2 and place two labels per page
+    # Iterate in steps of 2 to place two per page, but using ordered list
     i = 0
-    n = len(order_ids)
+    n = len(orders)
     while i < n:
-        # New A6 page for every pair
-        # left slot (always)
-        oid_left = order_ids[i]
-        cur.execute("SELECT * FROM orders WHERE id=%s", (oid_left,))
-        left_row = cur.fetchone()
+        left_row = orders[i]
         if left_row:
             x_left = margin
             y_top = height - margin
-            draw_label_block(c, dict(left_row), x_left, y_top, slot_width, slot_height)
+            draw_label_block(c, left_row, x_left, y_top, slot_width, slot_height)
 
-        # right slot (if exists)
         if i + 1 < n:
-            oid_right = order_ids[i + 1]
-            cur.execute("SELECT * FROM orders WHERE id=%s", (oid_right,))
-            right_row = cur.fetchone()
+            right_row = orders[i + 1]
             if right_row:
                 x_right = margin + slot_width + gutter
                 y_top = height - margin
-                draw_label_block(c, dict(right_row), x_right, y_top, slot_width, slot_height)
+                draw_label_block(c, right_row, x_right, y_top, slot_width, slot_height)
 
-        # --- add dashed vertical line between slots ---
+        # divider between slots
         divider_x = margin + slot_width + (gutter / 2.0)
-        c.setDash(3, 3)  # dash pattern: 3 on, 3 off
+        c.setDash(3, 3)
         c.line(divider_x, margin, divider_x, height - margin)
-        c.setDash()  # reset to solid
+        c.setDash()
 
         c.showPage()
         i += 2
 
-    conn.close()
     c.save()
     return pdf_path
 
@@ -1032,10 +1119,94 @@ def generate_bulk_labels(order_ids):
 #     c.save()
 #     return pdf_path
 
+# def generate_bulk_labels_a4(order_ids):
+#     """
+#     A4 landscape, 3 columns x 2 rows = 6 labels per page.
+#     Adds outer margins and border around each slot.
+#     """
+#     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+#     pdf_path = os.path.join(LABEL_FOLDER, f"labels_bulk_a4_{ts}.pdf")
+
+#     # A4 landscape
+#     page_width, page_height = landscape(A4)
+
+#     # layout grid
+#     cols, rows = 3, 2
+
+#     # outer margin (adjust if you need larger margins)
+#     margin = 10 * mm
+
+#     # compute usable area inside margins
+#     usable_width = page_width - 2 * margin
+#     usable_height = page_height - 2 * margin
+
+#     # slot sizes
+#     slot_width = usable_width / cols
+#     slot_height = usable_height / rows
+
+#     # gutter between slots (optional)
+#     gutter = 4 * mm
+
+#     c = canvas.Canvas(pdf_path, pagesize=(page_width, page_height))
+
+#     conn = get_conn()
+#     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+#     # iterate orders and place them in grid; create a new page every cols*rows items
+#     for i, oid in enumerate(order_ids):
+#         # fetch order
+#         cur.execute("SELECT * FROM orders WHERE id=%s", (oid,))
+#         row = cur.fetchone()
+#         if not row:
+#             continue
+#         order = dict(row)
+
+#         # index within page (0 .. cols*rows-1)
+#         index_in_page = i % (cols * rows)
+#         col = index_in_page % cols
+#         row_idx = index_in_page // cols  # 0 = top row, 1 = bottom row (we'll invert below)
+
+#         # compute top-left of slot (ReportLab origin is bottom-left)
+#         x_left = margin + col * slot_width
+#         # for y, row_idx 0 should be TOP row -> y_top = page_height - margin - (row_idx * slot_height)
+#         y_top = page_height - margin - (row_idx * slot_height)
+
+#         # Draw border rectangle for the slot
+#         c.setLineWidth(0.6)
+#         c.rect(x_left, y_top - slot_height, slot_width, slot_height)
+
+#         # (Optional) draw vertical separator dashed line between columns (visual aid)
+#         # you can uncomment if you also want dashed lines between slots
+#         # if col < cols - 1:
+#         #     sep_x = x_left + slot_width + (gutter / 2.0)
+#         #     c.setDash(3, 3)
+#         #     c.line(x_left + slot_width, y_top - slot_height, x_left + slot_width, y_top)
+#         #     c.setDash()
+
+#         # draw label content inside the slot. draw_label_block expects:
+#         #   (canvas, order, x_left, y_top, slot_width, slot_height)
+#         draw_label_block(c, order, x_left, y_top, slot_width, slot_height)
+
+#         # show page at end of full page or at the very end (we'll call showPage when page full)
+#         if index_in_page == (cols * rows - 1):
+#             c.showPage()
+
+#     # If the last page was partial (i.e., not exactly multiple of cols*rows) we must still finalize it.
+#     # If the last operation did NOT end with showPage (i.e., last index not the last of page), call showPage.
+#     if len(order_ids) % (cols * rows) != 0:
+#         c.showPage()
+
+#     conn.close()
+#     c.save()
+#     return pdf_path
+
+# -------------------------
+# generate_bulk_labels_a4 (A4 landscape 6-per-page) using supabase
+# -------------------------
 def generate_bulk_labels_a4(order_ids):
     """
     A4 landscape, 3 columns x 2 rows = 6 labels per page.
-    Adds outer margins and border around each slot.
+    Uses Supabase to fetch orders and preserves input ordering.
     """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     pdf_path = os.path.join(LABEL_FOLDER, f"labels_bulk_a4_{ts}.pdf")
@@ -1046,70 +1217,38 @@ def generate_bulk_labels_a4(order_ids):
     # layout grid
     cols, rows = 3, 2
 
-    # outer margin (adjust if you need larger margins)
+    # outer margin
     margin = 10 * mm
 
-    # compute usable area inside margins
     usable_width = page_width - 2 * margin
     usable_height = page_height - 2 * margin
 
-    # slot sizes
     slot_width = usable_width / cols
     slot_height = usable_height / rows
 
-    # gutter between slots (optional)
-    gutter = 4 * mm
-
     c = canvas.Canvas(pdf_path, pagesize=(page_width, page_height))
 
-    conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    orders = _fetch_orders_by_ids(order_ids)
 
-    # iterate orders and place them in grid; create a new page every cols*rows items
-    for i, oid in enumerate(order_ids):
-        # fetch order
-        cur.execute("SELECT * FROM orders WHERE id=%s", (oid,))
-        row = cur.fetchone()
-        if not row:
-            continue
-        order = dict(row)
-
-        # index within page (0 .. cols*rows-1)
-        index_in_page = i % (cols * rows)
+    for idx, order in enumerate(orders):
+        index_in_page = idx % (cols * rows)
         col = index_in_page % cols
-        row_idx = index_in_page // cols  # 0 = top row, 1 = bottom row (we'll invert below)
-
-        # compute top-left of slot (ReportLab origin is bottom-left)
+        row_idx = index_in_page // cols  # 0 = top row
         x_left = margin + col * slot_width
-        # for y, row_idx 0 should be TOP row -> y_top = page_height - margin - (row_idx * slot_height)
         y_top = page_height - margin - (row_idx * slot_height)
 
-        # Draw border rectangle for the slot
+        # border
         c.setLineWidth(0.6)
         c.rect(x_left, y_top - slot_height, slot_width, slot_height)
 
-        # (Optional) draw vertical separator dashed line between columns (visual aid)
-        # you can uncomment if you also want dashed lines between slots
-        # if col < cols - 1:
-        #     sep_x = x_left + slot_width + (gutter / 2.0)
-        #     c.setDash(3, 3)
-        #     c.line(x_left + slot_width, y_top - slot_height, x_left + slot_width, y_top)
-        #     c.setDash()
-
-        # draw label content inside the slot. draw_label_block expects:
-        #   (canvas, order, x_left, y_top, slot_width, slot_height)
         draw_label_block(c, order, x_left, y_top, slot_width, slot_height)
 
-        # show page at end of full page or at the very end (we'll call showPage when page full)
         if index_in_page == (cols * rows - 1):
             c.showPage()
 
-    # If the last page was partial (i.e., not exactly multiple of cols*rows) we must still finalize it.
-    # If the last operation did NOT end with showPage (i.e., last index not the last of page), call showPage.
     if len(order_ids) % (cols * rows) != 0:
         c.showPage()
 
-    conn.close()
     c.save()
     return pdf_path
 
@@ -1494,20 +1633,68 @@ def admin_list_orders(request: Request, status: str = "pending", q: str = "", pa
     )
 
 
+# def get_status_counts():
+#     conn = get_conn()
+#     cur = conn.cursor()
+#     res = {}
+#     for st in ("pending", "shipped", "cancelled"):
+#         cur.execute("SELECT COUNT(*) AS c FROM orders WHERE status=%s", (st,))
+#         res[st] = cur.fetchone()["c"]
+#     cur.execute("SELECT COUNT(*) AS c FROM orders")
+#     res["all"] = cur.fetchone()["c"]
+#     conn.close()
+#     return res
+
+# -------------------------
+# get_status_counts via Supabase
+# -------------------------
 def get_status_counts():
-    conn = get_conn()
-    cur = conn.cursor()
-    res = {}
-    for st in ("pending", "shipped", "cancelled"):
-        cur.execute("SELECT COUNT(*) AS c FROM orders WHERE status=%s", (st,))
-        res[st] = cur.fetchone()["c"]
-    cur.execute("SELECT COUNT(*) AS c FROM orders")
-    res["all"] = cur.fetchone()["c"]
-    conn.close()
-    return res
+    """
+    Returns dict with counts per status and overall.
+    Uses Supabase select + client-side counting (robust across client versions).
+    """
+    try:
+        # fetch all orders' id and quantity (could be heavy if many rows; consider aggregate/sql if table grows)
+        res_all = supabase.table("orders").select("id, quantity, status").execute()
+        data_all, err_all = _unpack_supabase_response(res_all)
+        if err_all:
+            logger.warning("get_status_counts: supabase select returned error: %s", err_all)
+            # fallback zeros
+            return {"pending": 0, "shipped": 0, "cancelled": 0, "all": 0}
+
+        rows = data_all or []
+        counts = {"pending": 0, "shipped": 0, "cancelled": 0}
+        total = 0
+        for r in rows:
+            total += 1
+            st = (r.get("status") or "").lower()
+            if st in counts:
+                counts[st] += 1
+
+        counts["all"] = total
+        return counts
+    except Exception as e:
+        logger.exception("get_status_counts failed: %s", e)
+        return {"pending": 0, "shipped": 0, "cancelled": 0, "all": 0}
 
 # ---- Update status ----
 
+# @app.post("/admin/orders/{order_id}/status")
+# def admin_update_status(order_id: int, request: Request, status: str = Form(...)):
+#     require_admin(request)
+#     if status not in ("pending", "shipped", "cancelled"):
+#         raise HTTPException(status_code=400, detail="Invalid status")
+#     try:
+#         res = supabase.table("orders").update({"status": status}).eq("id", order_id).execute()
+#         if res.error:
+#             raise RuntimeError(res.error)
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"Update failed: {e}")
+#     return {"ok": True}
+
+# -------------------------
+# admin_update_status -> supabase
+# -------------------------
 @app.post("/admin/orders/{order_id}/status")
 def admin_update_status(order_id: int, request: Request, status: str = Form(...)):
     require_admin(request)
@@ -1515,9 +1702,14 @@ def admin_update_status(order_id: int, request: Request, status: str = Form(...)
         raise HTTPException(status_code=400, detail="Invalid status")
     try:
         res = supabase.table("orders").update({"status": status}).eq("id", order_id).execute()
-        if res.error:
-            raise RuntimeError(res.error)
+        data, err = _unpack_supabase_response(res)
+        if err:
+            logger.error("admin_update_status supabase error: %s", err)
+            raise HTTPException(status_code=500, detail=f"Update failed: {err}")
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.exception("admin_update_status exception: %s", e)
         raise HTTPException(status_code=500, detail=f"Update failed: {e}")
     return {"ok": True}
 
@@ -1527,6 +1719,48 @@ def admin_update_status(order_id: int, request: Request, status: str = Form(...)
 def admin_ping():
     return {"ok": True}
 
+# @app.post("/admin/orders/bulk-action")
+# async def admin_bulk_action(
+#     request: Request,
+#     action: str = Form(...),
+#     order_ids: List[int] = Form(default=[]),
+# ):
+#     if not is_logged_in(request):
+#         return RedirectResponse(url="/admin/login", status_code=303)
+
+#     if not order_ids:
+#         return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
+
+#     conn = get_conn()
+#     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+#     placeholders = ",".join("%s" for _ in order_ids)
+
+#     if action == "mark_shipped":
+#         cur.execute(f"UPDATE orders SET status='shipped' WHERE id IN ({placeholders})", order_ids)
+#         conn.commit()
+#         conn.close()
+#         return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
+
+#     elif action == "cancel":
+#         cur.execute(f"UPDATE orders SET status='cancelled' WHERE id IN ({placeholders})", order_ids)
+#         conn.commit()
+#         conn.close()
+#         return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
+
+#     elif action == "generate_labels":
+#         conn.close()
+#         # pdf_path = generate_bulk_labels(order_ids)
+#         # return FileResponse(pdf_path, media_type="application/pdf", filename=os.path.basename(pdf_path))
+#         pdf_path = generate_bulk_labels_a4(order_ids)
+#         return FileResponse(pdf_path, media_type="application/pdf", filename=os.path.basename(pdf_path))
+
+#     conn.close()
+#     return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
+
+# -------------------------
+# admin_bulk_action -> supabase
+# -------------------------
 @app.post("/admin/orders/bulk-action")
 async def admin_bulk_action(
     request: Request,
@@ -1539,42 +1773,62 @@ async def admin_bulk_action(
     if not order_ids:
         return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
 
-    conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    # operate using Supabase
+    try:
+        if action == "mark_shipped":
+            res = supabase.table("orders").update({"status": "shipped"}).in_("id", order_ids).execute()
+            data, err = _unpack_supabase_response(res)
+            if err:
+                logger.error("bulk mark_shipped error: %s", err)
+            return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
 
-    placeholders = ",".join("%s" for _ in order_ids)
+        elif action == "cancel":
+            res = supabase.table("orders").update({"status": "cancelled"}).in_("id", order_ids).execute()
+            data, err = _unpack_supabase_response(res)
+            if err:
+                logger.error("bulk cancel error: %s", err)
+            return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
 
-    if action == "mark_shipped":
-        cur.execute(f"UPDATE orders SET status='shipped' WHERE id IN ({placeholders})", order_ids)
-        conn.commit()
-        conn.close()
-        return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
+        elif action == "generate_labels":
+            # create pdf from supabase-fetched rows (we will preserve order passed)
+            pdf_path = generate_bulk_labels_a4(order_ids)
+            return FileResponse(pdf_path, media_type="application/pdf", filename=os.path.basename(pdf_path))
 
-    elif action == "cancel":
-        cur.execute(f"UPDATE orders SET status='cancelled' WHERE id IN ({placeholders})", order_ids)
-        conn.commit()
-        conn.close()
-        return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
+    except Exception as e:
+        logger.exception("admin_bulk_action failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Bulk action failed: {e}")
 
-    elif action == "generate_labels":
-        conn.close()
-        # pdf_path = generate_bulk_labels(order_ids)
-        # return FileResponse(pdf_path, media_type="application/pdf", filename=os.path.basename(pdf_path))
-        pdf_path = generate_bulk_labels_a4(order_ids)
-        return FileResponse(pdf_path, media_type="application/pdf", filename=os.path.basename(pdf_path))
-
-    conn.close()
     return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
 
+# @app.post("/admin/orders/{order_id}/cancel")
+# def admin_cancel_single(request: Request, order_id: int):
+#     if not is_logged_in(request):
+#         return RedirectResponse(url="/admin/login", status_code=303)
+#     conn = get_conn()
+#     cur = conn.cursor()
+#     cur.execute("UPDATE orders SET status='cancelled' WHERE id=%s", (order_id,))
+#     conn.commit()
+#     conn.close()
+#     return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
+
+# -------------------------
+# admin_cancel_single -> supabase
+# -------------------------
 @app.post("/admin/orders/{order_id}/cancel")
 def admin_cancel_single(request: Request, order_id: int):
     if not is_logged_in(request):
         return RedirectResponse(url="/admin/login", status_code=303)
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE orders SET status='cancelled' WHERE id=%s", (order_id,))
-    conn.commit()
-    conn.close()
+    try:
+        res = supabase.table("orders").update({"status": "cancelled"}).eq("id", order_id).execute()
+        data, err = _unpack_supabase_response(res)
+        if err:
+            logger.error("admin_cancel_single error: %s", err)
+            raise HTTPException(status_code=500, detail=f"Cancel failed: {err}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("admin_cancel_single exception: %s", e)
+        raise HTTPException(status_code=500, detail=f"Cancel failed: {e}")
     return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
 
 @app.get("/admin/orders/{order_id}/label")
