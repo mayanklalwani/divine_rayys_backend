@@ -10,6 +10,8 @@
       <th>Name</th>
       <th>Phone</th>
       <th>Address</th>
+      <th>Qty</th>
+      <th>Created At</th>
       <th>Status</th>
     </tr>
   </thead>
@@ -19,10 +21,34 @@
       <td>{{ order.id }}</td>
       <td>{{ order.name }}</td>
       <td>{{ order.phone }}</td>
-      <td>{{ order.address }}</td>
+      <td>
+        {# Build address from columns available in the DB #}
+        {% set parts = [] %}
+        {% if order.addressline1 %}{% set _ = parts.append(order.addressline1) %}{% endif %}
+        {% if order.addressline2 %}{% set _ = parts.append(order.addressline2) %}{% endif %}
+        {% if order.landmark %}{% set _ = parts.append(order.landmark) %}{% endif %}
+        {{ parts | join(', ') }}
+        {% if (order.city or order.state or order.pincode) %}
+          <br/>
+          {{ [order.city, order.state] | select('string') | join(', ') }}
+          {% if order.pincode %} - {{ order.pincode }}{% endif %}
+        {% endif %}
+      </td>
+      <td>{{ order.quantity or 0 }}</td>
+      <td>
+        {# created_at might be a datetime or a string; handle both #}
+        {% if order.created_at is string %}
+          {{ order.created_at }}
+        {% else %}
+          {{ order.created_at.strftime("%Y-%m-%d %H:%M") if order.created_at else "" }}
+        {% endif %}
+      </td>
       <td>{{ order.status }}</td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
+
+{# simple pagination info #}
+<p>Page {{ page }} — showing {{ orders|length }} of {{ total }} results</p>
 {% endblock %}

@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Export Orders (pending/shipped)</h2>
+
+<form id="exportForm" class="export-form" method="post" action="/admin/export-orders">
+  <div class="controls">
+    <label for="start_id">Starting S.No (optional)</label>
+    <input type="number" id="start_id" name="start_id" min="1" placeholder="e.g. 100" style="width:140px;">
+
+    <label for="fmt">Format</label>
+    <select id="fmt" name="fmt" style="width:120px;">
+      <option value="pdf" selected>PDF</option>
+      <option value="xlsx">XLSX</option>
+    </select>
+
+    <button type="submit" class="btn">Download</button>
+  </div>
+</form>
+
+<p style="font-size:0.9em; color:#666; margin-top:8px;">
+  Only orders with status <b>pending</b> or <b>shipped</b> will be exported.  
+  If Starting S.No is set, only orders with ID ≥ Starting S.No are included.
+</p>
+
+<script>
+  // optional: you can add helpers here for filling start_id automatically
+</script>
+{% endblock %}

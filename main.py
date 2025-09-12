@@ -48,7 +48,7 @@ import re
 import requests
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A6
+from reportlab.lib.pagesizes import A6, A4
 from reportlab.lib.utils import simpleSplit
 import qrcode
 from io import BytesIO
@@ -59,6 +59,12 @@ from typing import List
 import httpx
 import json
 import types
+from reportlab.platypus import Table, TableStyle, SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+import tempfile
+from openpyxl import Workbook
+from openpyxl.styles import Border, Side, Alignment, Font
 
 # Set your Supabase credentials
 SUPABASE_URL = "https://zjgzqudobxmqgulyhgft.supabase.co"   # Replace with your project URL
@@ -1554,6 +1560,84 @@ def admin_dashboard(request: Request):
 
 # ---- Data API for the dashboard table ----
 
+# @app.get("/admin/orders")
+# def admin_list_orders(request: Request, status: str = "pending", q: str = "", page: int = 1, page_size: int = 20):
+#     require_admin(request)
+
+#     offset = max(0, (page - 1) * page_size)
+#     start = offset
+#     end = offset + page_size - 1
+
+#     try:
+#         # Start with select(*) so .eq/.range/.order exist on the returned builder
+#         query = supabase.table("orders").select("*")
+
+#         # Add filters AFTER select()
+#         if status:
+#             query = query.eq("status", status)
+
+#         # (Optional) if you want server-side text filtering and your supabase client supports ilike:
+#         # if q:
+#         #     query = query.ilike("name", f"%{q}%")  # adjust field(s) as needed
+#         # If ilike isn't available, we'll filter in-Python after fetching the page.
+
+#         # Apply ordering & pagination
+#         res = query.order("id", desc=True).range(start, end).execute()
+
+#         # Unpack response safely
+#         rows, err = _unpack_supabase_response(res)
+#         if err:
+#             logger.error("Supabase query error (list): %s", err)
+#             raise HTTPException(status_code=500, detail=f"Query failed: {err}")
+
+#         rows = rows or []
+
+#         # If user supplied q and the client doesn't support ilike, do simple filter locally:
+#         if q:
+#             q_lower = q.lower()
+#             def matches(r):
+#                 return (
+#                     (r.get("phone") and q_lower in str(r.get("phone")).lower()) or
+#                     (r.get("name") and q_lower in str(r.get("name")).lower())
+#                 )
+#             rows = [r for r in rows if matches(r)]
+
+#         # Get total count (safe, simple approach)
+#         try:
+#             count_query = supabase.table("orders").select("id")
+#             if status:
+#                 count_query = count_query.eq("status", status)
+#             count_res = count_query.execute()
+#             count_data, count_err = _unpack_supabase_response(count_res)
+#             if count_err:
+#                 logger.warning("Count query returned unexpected shape/error, falling back to page length: %s", count_err)
+#                 total = len(rows)
+#             else:
+#                 total = len(count_data or [])
+#         except Exception as ce:
+#             logger.warning("Count query failed; using page length fallback: %s", ce)
+#             total = len(rows)
+
+#     except HTTPException:
+#         # bubble up authentication / client errors
+#         raise
+#     except Exception as e:
+#         logger.exception("Unhandled error in admin_list_orders: %s", e)
+#         raise HTTPException(status_code=500, detail=f"Query failed: {e}")
+
+#     return templates.TemplateResponse(
+#         "admin_orders_filtered.html",
+#         {
+#             "request": request,
+#             "orders": [dict(r) for r in rows],
+#             "total": total,
+#             "page": page,
+#             "page_size": page_size,
+#             "status": status,
+#             "q": q
+#         }
+#     )
+
 @app.get("/admin/orders")
 def admin_list_orders(request: Request, status: str = "pending", q: str = "", page: int = 1, page_size: int = 20):
     require_admin(request)
@@ -1563,22 +1647,14 @@ def admin_list_orders(request: Request, status: str = "pending", q: str = "", pa
     end = offset + page_size - 1
 
     try:
-        # Start with select(*) so .eq/.range/.order exist on the returned builder
+        # Build query
         query = supabase.table("orders").select("*")
-
-        # Add filters AFTER select()
         if status:
             query = query.eq("status", status)
 
-        # (Optional) if you want server-side text filtering and your supabase client supports ilike:
-        # if q:
-        #     query = query.ilike("name", f"%{q}%")  # adjust field(s) as needed
-        # If ilike isn't available, we'll filter in-Python after fetching the page.
-
-        # Apply ordering & pagination
+        # Apply ordering & pagination (range uses start/end inclusive)
         res = query.order("id", desc=True).range(start, end).execute()
 
-        # Unpack response safely
         rows, err = _unpack_supabase_response(res)
         if err:
             logger.error("Supabase query error (list): %s", err)
@@ -1586,7 +1662,7 @@ def admin_list_orders(request: Request, status: str = "pending", q: str = "", pa
 
         rows = rows or []
 
-        # If user supplied q and the client doesn't support ilike, do simple filter locally:
+        # If q provided and client doesn't support ilike, do basic client-side filter
         if q:
             q_lower = q.lower()
             def matches(r):
@@ -1596,7 +1672,7 @@ def admin_list_orders(request: Request, status: str = "pending", q: str = "", pa
                 )
             rows = [r for r in rows if matches(r)]
 
-        # Get total count (safe, simple approach)
+        # Count total matching rows (simple approach)
         try:
             count_query = supabase.table("orders").select("id")
             if status:
@@ -1612,25 +1688,40 @@ def admin_list_orders(request: Request, status: str = "pending", q: str = "", pa
             logger.warning("Count query failed; using page length fallback: %s", ce)
             total = len(rows)
 
+        # Normalize rows and convert created_at to datetime when possible
+        normalized = []
+        for r in rows:
+            try:
+                od = dict(r)
+                if "created_at" in od and od["created_at"]:
+                    od["created_at"] = _parse_iso_datetime(od["created_at"])
+                normalized.append(od)
+            except Exception as e:
+                logger.warning("Row normalization failed: %s. Row repr: %s", e, repr(r)[:300])
+                try:
+                    normalized.append(dict(r))
+                except Exception:
+                    normalized.append(r)
+
+        return templates.TemplateResponse(
+            "admin_orders_filtered.html",
+            {
+                "request": request,
+                "orders": [dict(r) for r in normalized],
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "status": status,
+                "q": q
+            }
+        )
+
     except HTTPException:
-        # bubble up authentication / client errors
         raise
     except Exception as e:
         logger.exception("Unhandled error in admin_list_orders: %s", e)
         raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
-    return templates.TemplateResponse(
-        "admin_orders_filtered.html",
-        {
-            "request": request,
-            "orders": [dict(r) for r in rows],
-            "total": total,
-            "page": page,
-            "page_size": page_size,
-            "status": status,
-            "q": q
-        }
-    )
 
 
 # def get_status_counts():
@@ -1884,3 +1975,171 @@ if __name__ == "__main__":
         reload=DEV_RELOAD,
         log_level=LOG_LEVEL,
     )
+
+# ---------- New helper: fetch export rows ----------
+def _fetch_export_rows(start_id=None):
+    """
+    Return list of dict rows where status in ('pending','shipped') and id >= start_id if provided.
+    Each row: {'id': ..., 'name': ..., 'city': ...}
+    """
+    try:
+        q = supabase.table("orders").select("id, name, city, status")
+        # Only pending or shipped
+        # supabase-py doesn't have .in_ everywhere; many versions support .in_('status', ['pending','shipped'])
+        try:
+            q = q.in_("status", ["pending", "shipped"])
+        except Exception:
+            # fallback: fetch all and filter below
+            pass
+
+        if start_id:
+            try:
+                q = q.gte("id", int(start_id))
+            except Exception:
+                # if client lacks gte, we'll filter after fetch
+                pass
+
+        # ordering by id ascending
+        res = q.order("id", desc=False).execute()
+        data, err = _unpack_supabase_response(res)
+        if err:
+            logger.error("Export fetch error: %s", err)
+            raise RuntimeError(err)
+        rows = data or []
+
+        # final safety filtering for client versions without in_/gte
+        filtered = []
+        for r in rows:
+            try:
+                st = (r.get("status") or "").lower()
+                oid = int(r.get("id"))
+            except Exception:
+                continue
+            if st not in ("pending", "shipped"):
+                continue
+            if start_id is not None:
+                try:
+                    if oid < int(start_id):
+                        continue
+                except Exception:
+                    pass
+            filtered.append({"id": oid, "name": r.get("name") or "", "city": r.get("city") or ""})
+        return filtered
+    except Exception as e:
+        logger.exception("Failed to fetch export rows: %s", e)
+        raise
+
+# ---------- New endpoint: export orders ----------
+@app.post("/admin/export-orders")
+def admin_export_orders(request: Request, start_id: str = Form(None), fmt: str = Form("pdf")):
+    """
+    Admin-only endpoint that creates a PDF or XLSX of orders with columns:
+      S.No (order.id), Name, City, Dispatched (blank), Received (blank)
+
+    Form params:
+      start_id (optional): if set, only orders with id >= start_id are exported
+      fmt: 'pdf' or 'xlsx'
+    """
+    require_admin(request)
+
+    fmt = (fmt or "pdf").lower()
+    if fmt not in ("pdf", "xlsx"):
+        raise HTTPException(status_code=400, detail="Unsupported format. Use 'pdf' or 'xlsx'.")
+
+    try:
+        rows = _fetch_export_rows(start_id=start_id if start_id not in ("", None) else None)
+
+        # If no rows, still return empty file with header
+        # Build table data: headers + rows
+        table_data = []
+        headers = ["S.No", "Name", "City", "Dispatched", "Received"]
+        table_data.append(headers)
+        for r in rows:
+            table_data.append([r["id"], r["name"], r["city"], "", ""])
+
+        # Temporary file path
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if fmt == "pdf":
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=f"_orders_{ts}.pdf")
+            tmp.close()
+            pdf_path = tmp.name
+
+            # Create PDF with ReportLab Table and bordered style
+            doc = SimpleDocTemplate(pdf_path, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=18 * mm, bottomMargin=18 * mm)
+            story = []
+            styles = getSampleStyleSheet()
+            title = Paragraph(f"Orders Export (status: pending/shipped){' — starting id >= ' + str(start_id) if start_id else ''}", styles["Heading2"])
+            story.append(title)
+            story.append(Spacer(1, 6))
+
+            # Column width heuristics: S.No narrow, Name wider, City medium, Dispatched/Received narrow
+            page_w, _ = A4
+            usable_w = page_w - (18 * mm + 18 * mm)
+            col_widths = [30 * mm, usable_w * 0.45, usable_w * 0.25, usable_w * 0.10, usable_w * 0.10]
+
+            t = Table(table_data, colWidths=col_widths, repeatRows=1)
+            t_style = TableStyle([
+                ("GRID", (0, 0), (-1, -1), 0.6, colors.black),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f2f2f2")),
+                ("ALIGN", (0, 0), (0, -1), "CENTER"),  # S.No center
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ])
+            t.setStyle(t_style)
+
+            story.append(t)
+            doc.build(story)
+            filename = f"orders_{ts}.pdf"
+            return FileResponse(pdf_path, media_type="application/pdf", filename=filename)
+
+        else:  # fmt == xlsx
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=f"_orders_{ts}.xlsx")
+            tmp.close()
+            xlsx_path = tmp.name
+
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Orders"
+
+            # write header
+            header_font = Font(bold=True)
+            thin = Side(border_style="thin", color="000000")
+            border = Border(left=thin, right=thin, top=thin, bottom=thin)
+            align = Alignment(vertical="center", wrap_text=True)
+
+            for col_idx, h in enumerate(headers, start=1):
+                cell = ws.cell(row=1, column=col_idx, value=h)
+                cell.font = header_font
+                cell.border = border
+                cell.alignment = align
+
+            # write rows
+            for row_idx, r in enumerate(rows, start=2):
+                ws.cell(row=row_idx, column=1, value=r["id"]).border = border
+                ws.cell(row=row_idx, column=2, value=r["name"]).border = border
+                ws.cell(row=row_idx, column=3, value=r["city"]).border = border
+                ws.cell(row=row_idx, column=4, value="").border = border
+                ws.cell(row=row_idx, column=5, value="").border = border
+
+            # column widths (approx)
+            ws.column_dimensions["A"].width = 8   # S.No
+            ws.column_dimensions["B"].width = 35  # Name
+            ws.column_dimensions["C"].width = 20  # City
+            ws.column_dimensions["D"].width = 12  # Dispatched
+            ws.column_dimensions["E"].width = 12  # Received
+
+            wb.save(xlsx_path)
+            filename = f"orders_{ts}.xlsx"
+            return FileResponse(xlsx_path, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=filename)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Export failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Export failed: {e}")
+
+@app.get("/admin/export", response_class=HTMLResponse)
+def admin_export_page(request: Request):
+    require_admin(request)
+    return templates.TemplateResponse("admin_export.html", {"request": request})

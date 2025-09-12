@@ -5,6 +5,30 @@
   <title>Admin | Orders</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="/static/admin.css" rel="stylesheet">
+  <style>
+    /* small styles used by the tab UI so you don't need to change CSS file now */
+    .tabs { display:flex; gap:8px; margin-bottom:16px; }
+    .tab { padding:6px 12px; border-radius:4px; background:#f0f0f0; cursor:pointer; }
+    .tab.active { background:#2c7be5; color:white; }
+    .panel { display:none; }
+    .panel.active { display:block; }
+    .export-form { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+    .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .btn {
+      padding:6px 10px;
+      border-radius:4px;
+      border:1px solid #2c7be5;
+      background:#2c7be5;
+      color:#fff;      /* white text */
+      cursor:pointer;
+    }
+    .btn.outline { background:transparent; border:1px solid #bbb; }
+    table.orders { width:100%; border-collapse:collapse; margin-top:12px; }
+    table.orders th, table.orders td { border:1px solid #ddd; padding:6px 8px; text-align:left; }
+    .stats { display:flex; gap:18px; flex-wrap:wrap; margin-bottom:12px; }
+    .actions { display:flex; gap:8px; margin-bottom:8px; }
+    .row-actions { display:flex; gap:6px; align-items:center; }
+  </style>
 </head>
 <body>
   <header class="topbar">
@@ -14,6 +38,7 @@
       <a href="/admin/orders?status=pending">Pending</a>
       <a href="/admin/orders?status=shipped">Dispatched</a>
       <a href="/admin/orders?status=cancelled">Cancelled</a>
+      <a href="/admin/export">Export</a>   <!-- 👈 NEW -->
       <a href="/admin/logout">Logout</a>
     </nav>
   </header>
