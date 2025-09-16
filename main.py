@@ -7,6 +7,7 @@ from math import floor
 from reportlab.lib.units import mm
 from reportlab.lib.utils import simpleSplit
 from reportlab.lib.pagesizes import A4, landscape
+from reportlab.pdfbase import pdfmetrics
 import socket
 import os
 import uvicorn
@@ -619,17 +620,72 @@ async def create_order(
 # ---------- Label Generation ----------
 FROM_BLOCK = [
     "From :",
-    "Kaillash Rrohida,",
+    "Kaillash RRohida,",
     "Indore,",
     "Mobile: +91-9893270011",
 ]
 
-def draw_wrapped_text(c, text, x, y, max_width, font_name="Helvetica", font_size=11, leading=14):
+def fit_and_wrap_lines(text, font_name, font_size, max_width, max_lines, leading, min_font_size=8):
+    """
+    Try wrapping `text` at font_size into lines that fit max_width using simpleSplit.
+    If the wrapped lines exceed max_lines, reduce font_size stepwise until it fits or until min_font_size.
+    If it still doesn't fit at min_font_size, truncate last visible line and append '...'.
+    Returns: (used_font_size, lines)
+    """
+    if not text:
+        return font_size, []
+
+    used_size = font_size
+    # attempt reduce font size until it fits
+    while used_size >= min_font_size:
+        lines = simpleSplit(text, font_name, used_size, max_width)
+        if max_lines is None or len(lines) <= max_lines:
+            return used_size, lines
+        # not fit -> reduce font size a bit and retry
+        used_size -= 1
+
+    # at this point we are at min_font_size and still too many lines: truncate to max_lines
+    lines = simpleSplit(text, font_name, min_font_size, max_width)
+    if max_lines is None or max_lines <= 0:
+        return min_font_size, lines[:max_lines] if max_lines else lines
+
+    if len(lines) > max_lines:
+        allowed = lines[:max_lines]
+        last = allowed[-1]
+        # trim last so ellipsis fits — naive: remove last 3 characters and append '...'
+        # better approach: shrink last until width fits
+        ell = "..."
+        # shorten last until width fits
+        while pdfmetrics.stringWidth(allowed[-1] + ell, font_name, min_font_size) > max_width and len(allowed[-1]) > 0:
+            allowed[-1] = allowed[-1][:-1]
+        allowed[-1] = allowed[-1].rstrip() + ell
+        return min_font_size, allowed
+
+    return min_font_size, lines
+
+
+# def draw_wrapped_text(c, text, x, y, max_width, font_name="Helvetica", font_size=11, leading=14):
+#     """
+#     Draws text with word wrapping starting at (x,y); y decreases downward.
+#     """
+#     c.setFont(font_name, font_size)
+#     lines = simpleSplit(text, font_name, font_size, max_width)
+#     for i, line in enumerate(lines):
+#         c.drawString(x, y - i * leading, line)
+#     return y - (len(lines) * leading)
+
+def draw_wrapped_text(c, text, x, y, max_width, font_name="Helvetica", font_size=11, leading=14, min_font_size=8):
     """
     Draws text with word wrapping starting at (x,y); y decreases downward.
+    Attempts to fit text by reducing font size if needed. Returns final y after drawing.
     """
-    c.setFont(font_name, font_size)
-    lines = simpleSplit(text, font_name, font_size, max_width)
+    if not text:
+        return y
+    # estimate how many lines can fit if no lower bound: use a large number or compute using page space (caller might know)
+    # Here we assume caller wants all lines (no explicit min_y), so we won't clamp vertically but we do attempt to reduce font size
+    # to avoid overflowing horizontally and reduce visual overflow.
+    used_size, lines = fit_and_wrap_lines(text, font_name, font_size, max_width, None, leading, min_font_size=min_font_size)
+    c.setFont(font_name, used_size)
     for i, line in enumerate(lines):
         c.drawString(x, y - i * leading, line)
     return y - (len(lines) * leading)
@@ -683,26 +739,26 @@ def draw_label_page(c, order):
 
 # def draw_label_block(c, order, x_left, y_top, slot_width, slot_height):
 #     """
-#     Draw a single label in the slot rectangle (x_left, y_top) with slot_width x slot_height.
+#     Draw a single label inside slot rectangle (x_left, y_top) with slot_width x slot_height.
 #     Ensures FROM block is wrapped to slot_width and body text doesn't overlap it.
+#     NOTE: y_top is the top edge of the slot (measured from page bottom).
 #     """
 #     # visual metrics
-#     leading = 12
-#     name_font = ("Helvetica-Bold", 12)
-#     body_font = ("Helvetica", 11)
-#     inset = 4 * mm
-#     gap_between_body_and_from = 3 * mm
+#     leading = 17
+#     name_font = ("Helvetica", 16)
+#     body_font = ("Helvetica", 16)
+#     inset = 6 * mm              # horizontal & vertical inset inside slot
+#     gap_between_body_and_from = 1 * mm
 #     from_font = ("Helvetica", 10)
 #     from_line_height = 12  # vertical spacing for FROM lines
 
-#     # Prepare FROM block wrapped to slot width
+#     # Prepare FROM block wrapped to slot width (respect inset)
 #     maxw = slot_width - 2 * inset
 #     raw_from_lines = FROM_BLOCK if isinstance(FROM_BLOCK, (list, tuple)) else [FROM_BLOCK]
 #     wrapped_from_lines = []
 #     for raw in raw_from_lines:
 #         if not raw:
 #             continue
-#         # simpleSplit returns wrapped lines for the available width
 #         wrapped = simpleSplit(raw, from_font[0], from_font[1], maxw)
 #         if wrapped:
 #             wrapped_from_lines.extend(wrapped)
@@ -718,8 +774,8 @@ def draw_label_page(c, order):
 #     slot_bottom_y = y_top - slot_height
 #     min_allowed_y_for_body = slot_bottom_y + reserved_bottom
 
-#     # Start drawing from top
-#     y = y_top
+#     # Start drawing from top, but apply a vertical top inset so text doesn't draw above the slot
+#     y = y_top - inset
 
 #     # "To," heading
 #     c.setFont(name_font[0], name_font[1])
@@ -761,15 +817,20 @@ def draw_label_page(c, order):
 #             font_name=body_font[0], font_size=body_font[1], leading=leading
 #         )
 
+    
+#     qty = order.get("quantity") or 0
+#     if qty:
+#         y -= 2  # a small vertical gap (adjust if needed)
+#         c.setFont("Helvetica-Bold", 10)
+#         c.drawString(x_left + inset, y, f"Qty: {int(qty)}")
+#         y -= leading
+#         c.setFont(body_font[0], body_font[1])  # restore body font for next lines
+
 #     # Now draw the FROM block inside the reserved bottom area.
-#     # We'll draw from top-to-bottom inside that reserved area.
 #     c.setFont(from_font[0], from_font[1])
 
-#     # compute starting y for first FROM line (topmost of FROM block)
-#     # topmost_from_y = slot_bottom_y + reserved_bottom - (inset) - (from_line_height - (from_line_height))
-#     # simpler: position first wrapped_from_lines[0] at slot_bottom_y + reserved_bottom - (from_line_height)
+#     # compute starting y for first FROM line (topmost of FROM block) inside reserved area
 #     topmost_from_y = slot_bottom_y + inset + from_height - from_line_height
-#     # Draw each wrapped FROM line in order
 #     for i, line in enumerate(wrapped_from_lines):
 #         line_y = topmost_from_y - i * from_line_height
 #         # safety clamp: do not draw below slot bottom + inset
@@ -781,12 +842,12 @@ def draw_label_block(c, order, x_left, y_top, slot_width, slot_height):
     """
     Draw a single label inside slot rectangle (x_left, y_top) with slot_width x slot_height.
     Ensures FROM block is wrapped to slot_width and body text doesn't overlap it.
-    NOTE: y_top is the top edge of the slot (measured from page bottom).
+    Adds Mobile No. line in the "To" block under the name.
     """
     # visual metrics
-    leading = 17
-    name_font = ("Helvetica", 16)
-    body_font = ("Helvetica", 16)
+    leading = 16
+    name_font = ("Helvetica-Bold", 14)
+    body_font = ("Helvetica", 12)
     inset = 6 * mm              # horizontal & vertical inset inside slot
     gap_between_body_and_from = 1 * mm
     from_font = ("Helvetica", 10)
@@ -814,7 +875,7 @@ def draw_label_block(c, order, x_left, y_top, slot_width, slot_height):
     slot_bottom_y = y_top - slot_height
     min_allowed_y_for_body = slot_bottom_y + reserved_bottom
 
-    # Start drawing from top, but apply a vertical top inset so text doesn't draw above the slot
+    # Start drawing from top, apply a vertical top inset so text doesn't draw above the slot
     y = y_top - inset
 
     # "To," heading
@@ -822,14 +883,14 @@ def draw_label_block(c, order, x_left, y_top, slot_width, slot_height):
     c.drawString(x_left + inset, y, "To,")
     y -= leading
 
-    # Recipient name
-    c.setFont(body_font[0], body_font[1])
+    # Recipient name (fit & wrap)
     name_line = (order.get("name") or "").strip()
-    y = draw_wrapped_text_slot(
-        c, name_line, x_left + inset, y,
-        maxw, min_allowed_y_for_body,
-        font_name=body_font[0], font_size=body_font[1], leading=leading
-    )
+    if name_line:
+        used_size, lines = fit_and_wrap_lines(name_line, body_font[0], body_font[1], maxw, None, leading, min_font_size=8)
+        c.setFont(body_font[0], used_size)
+        for i, ln in enumerate(lines):
+            c.drawString(x_left + inset, y - i * leading, ln)
+        y = y - (len(lines) * leading)
 
     # Address fields (joined)
     addr_parts = [
@@ -838,26 +899,45 @@ def draw_label_block(c, order, x_left, y_top, slot_width, slot_height):
         (order.get("landmark") or "").strip(),
     ]
     addr_text = ", ".join([p for p in addr_parts if p])
-    if addr_text:
-        y = draw_wrapped_text_slot(
-            c, addr_text, x_left + inset, y,
-            maxw, min_allowed_y_for_body,
-            font_name=body_font[0], font_size=body_font[1], leading=leading
-        )
+    # compute max lines allowed for address given remaining vertical space
+    y_available_for_address = y - min_allowed_y_for_body
+    if y_available_for_address < 0:
+        max_addr_lines = 0
+    else:
+        max_addr_lines = max(0, floor(y_available_for_address / leading))
 
-    # city/state/pincode
+    if addr_text and max_addr_lines > 0:
+        used_size, lines = fit_and_wrap_lines(addr_text, body_font[0], body_font[1], maxw, max_addr_lines, leading, min_font_size=8)
+        c.setFont(body_font[0], used_size)
+        for i, ln in enumerate(lines):
+            c.drawString(x_left + inset, y - i * leading, ln)
+        y = y - (len(lines) * leading)
+
+    # city/state/pincode (try to fit to remaining small area)
     city_state_pin = ", ".join([v for v in [order.get("city"), order.get("state")] if v])
     if order.get("pincode"):
         city_state_pin = f"{city_state_pin} - {order.get('pincode')}" if city_state_pin else order.get("pincode")
 
     if city_state_pin:
-        y = draw_wrapped_text_slot(
-            c, city_state_pin, x_left + inset, y,
-            maxw, min_allowed_y_for_body,
-            font_name=body_font[0], font_size=body_font[1], leading=leading
-        )
+        # small allowance of 1 or 2 lines
+        used_size, lines = fit_and_wrap_lines(city_state_pin, body_font[0], body_font[1], maxw, 2, leading, min_font_size=8)
+        c.setFont(body_font[0], used_size)
+        for i, ln in enumerate(lines):
+            c.drawString(x_left + inset, y - i * leading, ln)
+        y = y - (len(lines) * leading)
 
-    
+    # Mobile line: Mobile No. : <phone>
+    phone = (order.get("phone") or "").strip()
+    if phone:
+        mobile_text = f"Mobile No. : {phone}"
+        # draw mobile in slightly smaller size but ensure it fits in one or two lines
+        used_size, lines = fit_and_wrap_lines(mobile_text, body_font[0], 11, maxw, 2, leading, min_font_size=8)
+        c.setFont(body_font[0], used_size)
+        for i, ln in enumerate(lines):
+            c.drawString(x_left + inset, y - i * leading, ln)
+        y = y - (len(lines) * leading)
+
+    # Quantity (if present)
     qty = order.get("quantity") or 0
     if qty:
         y -= 2  # a small vertical gap (adjust if needed)
@@ -879,41 +959,69 @@ def draw_label_block(c, order, x_left, y_top, slot_width, slot_height):
         c.drawString(x_left + inset, line_y, line)
 
 
-def draw_wrapped_text_slot(c, text, x, y, max_width, min_y, font_name="Helvetica", font_size=11, leading=14):
+# def draw_wrapped_text_slot(c, text, x, y, max_width, min_y, font_name="Helvetica", font_size=11, leading=14):
+#     """
+#     Draw wrapped text starting at y and NOT going below min_y.
+#     If text lines exceed available space, truncate and append '...'.
+#     Returns new y after drawing.
+#     """
+#     if not text:
+#         return y
+#     c.setFont(font_name, font_size)
+#     lines = simpleSplit(text, font_name, font_size, max_width)
+
+#     available_height = y - min_y
+#     if available_height <= 0:
+#         return min_y
+
+#     max_lines = max(0, floor(available_height / leading))
+
+#     if len(lines) == 0:
+#         return y
+
+#     if len(lines) > max_lines and max_lines > 0:
+#         # keep lines up to max_lines, add ellipsis to last line
+#         allowed = lines[:max_lines]
+#         last = allowed[-1]
+#         ell = "..."
+#         # Try to trim last so ellipsis fits. We'll simply append ellipses; ReportLab will clip visually if still too long.
+#         allowed[-1] = (last.rstrip() + ell)
+#         lines_to_draw = allowed
+#     else:
+#         lines_to_draw = lines[:max_lines] if max_lines > 0 else []
+
+#     for i, line in enumerate(lines_to_draw):
+#         c.drawString(x, y - i * leading, line)
+
+#     return y - (len(lines_to_draw) * leading)
+
+def draw_wrapped_text_slot(c, text, x, y, max_width, min_y, font_name="Helvetica", font_size=11, leading=14, min_font_size=8):
     """
     Draw wrapped text starting at y and NOT going below min_y.
-    If text lines exceed available space, truncate and append '...'.
+    If text lines exceed available space, reduce font size until it fits or truncate and append '...'.
     Returns new y after drawing.
     """
     if not text:
         return y
-    c.setFont(font_name, font_size)
-    lines = simpleSplit(text, font_name, font_size, max_width)
 
+    # compute available vertical space (y down to min_y)
     available_height = y - min_y
     if available_height <= 0:
         return min_y
 
+    # compute max lines that can fit (floor)
     max_lines = max(0, floor(available_height / leading))
 
-    if len(lines) == 0:
-        return y
+    if max_lines == 0:
+        return min_y
 
-    if len(lines) > max_lines and max_lines > 0:
-        # keep lines up to max_lines, add ellipsis to last line
-        allowed = lines[:max_lines]
-        last = allowed[-1]
-        ell = "..."
-        # Try to trim last so ellipsis fits. We'll simply append ellipses; ReportLab will clip visually if still too long.
-        allowed[-1] = (last.rstrip() + ell)
-        lines_to_draw = allowed
-    else:
-        lines_to_draw = lines[:max_lines] if max_lines > 0 else []
+    used_size, lines = fit_and_wrap_lines(text, font_name, font_size, max_width, max_lines, leading, min_font_size=min_font_size)
 
-    for i, line in enumerate(lines_to_draw):
+    c.setFont(font_name, used_size)
+    for i, line in enumerate(lines):
         c.drawString(x, y - i * leading, line)
 
-    return y - (len(lines_to_draw) * leading)
+    return y - (len(lines) * leading)
 
 @app.get("/orders")
 def get_orders():
@@ -1072,140 +1180,6 @@ def generate_bulk_labels(order_ids):
     c.save()
     return pdf_path
 
-# def generate_bulk_labels_a4(order_ids):
-#     """
-#     Generates labels on A4 landscape sheets.
-#     Layout: 3 columns × 2 rows = 6 labels per page.
-#     Each label has a border rectangle.
-#     """
-#     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-#     pdf_path = os.path.join(LABEL_FOLDER, f"labels_bulk_a4_{ts}.pdf")
-
-#     # A4 in landscape orientation
-#     page_width, page_height = landscape(A4)
-
-#     # 3 cols × 2 rows grid
-#     cols, rows = 3, 2
-#     slot_width = page_width / cols
-#     slot_height = page_height / rows
-
-#     c = canvas.Canvas(pdf_path, pagesize=(page_width, page_height))
-
-#     conn = get_conn()
-#     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-#     for i, oid in enumerate(order_ids):
-#         # Fetch order
-#         cur.execute("SELECT * FROM orders WHERE id=%s", (oid,))
-#         row = cur.fetchone()
-#         if not row:
-#             continue
-#         order = dict(row)
-
-#         # Grid position
-#         grid_index = i % (cols * rows)  # 0..5
-#         col = grid_index % cols
-#         row_num = grid_index // cols
-
-#         # Top-left of this slot
-#         x_left = col * slot_width
-#         y_top = page_height - (row_num * slot_height)
-
-#         # Draw border rectangle
-#         c.rect(x_left, y_top - slot_height, slot_width, slot_height)
-
-#         # Draw label content
-#         draw_label_block(c, order, x_left, y_top, slot_width, slot_height)
-
-#         # After 6 labels, start a new page
-#         if grid_index == (cols * rows - 1):
-#             c.showPage()
-
-#     conn.close()
-#     c.save()
-#     return pdf_path
-
-# def generate_bulk_labels_a4(order_ids):
-#     """
-#     A4 landscape, 3 columns x 2 rows = 6 labels per page.
-#     Adds outer margins and border around each slot.
-#     """
-#     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-#     pdf_path = os.path.join(LABEL_FOLDER, f"labels_bulk_a4_{ts}.pdf")
-
-#     # A4 landscape
-#     page_width, page_height = landscape(A4)
-
-#     # layout grid
-#     cols, rows = 3, 2
-
-#     # outer margin (adjust if you need larger margins)
-#     margin = 10 * mm
-
-#     # compute usable area inside margins
-#     usable_width = page_width - 2 * margin
-#     usable_height = page_height - 2 * margin
-
-#     # slot sizes
-#     slot_width = usable_width / cols
-#     slot_height = usable_height / rows
-
-#     # gutter between slots (optional)
-#     gutter = 4 * mm
-
-#     c = canvas.Canvas(pdf_path, pagesize=(page_width, page_height))
-
-#     conn = get_conn()
-#     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-#     # iterate orders and place them in grid; create a new page every cols*rows items
-#     for i, oid in enumerate(order_ids):
-#         # fetch order
-#         cur.execute("SELECT * FROM orders WHERE id=%s", (oid,))
-#         row = cur.fetchone()
-#         if not row:
-#             continue
-#         order = dict(row)
-
-#         # index within page (0 .. cols*rows-1)
-#         index_in_page = i % (cols * rows)
-#         col = index_in_page % cols
-#         row_idx = index_in_page // cols  # 0 = top row, 1 = bottom row (we'll invert below)
-
-#         # compute top-left of slot (ReportLab origin is bottom-left)
-#         x_left = margin + col * slot_width
-#         # for y, row_idx 0 should be TOP row -> y_top = page_height - margin - (row_idx * slot_height)
-#         y_top = page_height - margin - (row_idx * slot_height)
-
-#         # Draw border rectangle for the slot
-#         c.setLineWidth(0.6)
-#         c.rect(x_left, y_top - slot_height, slot_width, slot_height)
-
-#         # (Optional) draw vertical separator dashed line between columns (visual aid)
-#         # you can uncomment if you also want dashed lines between slots
-#         # if col < cols - 1:
-#         #     sep_x = x_left + slot_width + (gutter / 2.0)
-#         #     c.setDash(3, 3)
-#         #     c.line(x_left + slot_width, y_top - slot_height, x_left + slot_width, y_top)
-#         #     c.setDash()
-
-#         # draw label content inside the slot. draw_label_block expects:
-#         #   (canvas, order, x_left, y_top, slot_width, slot_height)
-#         draw_label_block(c, order, x_left, y_top, slot_width, slot_height)
-
-#         # show page at end of full page or at the very end (we'll call showPage when page full)
-#         if index_in_page == (cols * rows - 1):
-#             c.showPage()
-
-#     # If the last page was partial (i.e., not exactly multiple of cols*rows) we must still finalize it.
-#     # If the last operation did NOT end with showPage (i.e., last index not the last of page), call showPage.
-#     if len(order_ids) % (cols * rows) != 0:
-#         c.showPage()
-
-#     conn.close()
-#     c.save()
-#     return pdf_path
-
 # -------------------------
 # generate_bulk_labels_a4 (A4 landscape 6-per-page) using supabase
 # -------------------------
@@ -1321,149 +1295,6 @@ def admin_logout(request: Request):
     return resp
 
 # ---- Dashboard page ----
-# @app.get("/admin", response_class=HTMLResponse)
-# def admin_dashboard(request: Request):
-#     if not request.session.get("admin"):
-#         return RedirectResponse(url="/admin/login", status_code=302)
-#     # return templates.TemplateResponse("admin_orders.html", {"request": request})
-#     conn = get_conn()
-#     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-#     cursor.execute("SELECT COUNT(*) as count, COALESCE(SUM(quantity),0) as qty FROM orders WHERE status='pending'")
-#     row = cursor.fetchone()
-#     pending_count, pending_qty = row["count"], row["qty"]
-
-#     cursor.execute("SELECT COUNT(*) as count, COALESCE(SUM(quantity),0) as qty FROM orders WHERE status='shipped'")
-#     row = cursor.fetchone()
-#     shipped_count, shipped_qty = row["count"], row["qty"]
-
-#     cursor.execute("SELECT COUNT(*) as count, COALESCE(SUM(quantity),0) as qty FROM orders WHERE status='cancelled'")
-#     row = cursor.fetchone()
-#     cancelled_count, cancelled_qty = row["count"], row["qty"]
-
-#     cursor.execute("SELECT COUNT(*) as count, COALESCE(SUM(quantity),0) as qty FROM orders")
-#     row = cursor.fetchone()
-#     total_count, total_qty = row["count"], row["qty"]
-
-#     cursor.execute("SELECT * FROM orders WHERE status='pending'")
-#     orders = cursor.fetchall()
-
-#     conn.close()
-
-#     counts = {
-#         "pending": pending_count,
-#         "shipped": shipped_count,
-#         "cancelled": cancelled_count,
-#     }
-
-#     stats = {
-#         "orders": {
-#             "pending": pending_count,
-#             "shipped": shipped_count,
-#             "cancelled": cancelled_count,
-#             "all": total_count,
-#         },
-#         "qty": {
-#             "pending": pending_qty,
-#             "shipped": shipped_qty,
-#             "cancelled": cancelled_qty,
-#             "all": total_qty,
-#         }
-#     }
-
-#     return templates.TemplateResponse(
-#         "admin_orders.html",
-#         {
-#             "request": request,
-#             "stats": stats,
-#             "orders": orders
-#         }
-#     )
-
-# @app.get("/admin", response_class=HTMLResponse)
-# def admin_dashboard(request: Request):
-#     # auth
-#     if not request.session.get("admin"):
-#         return RedirectResponse(url="/admin/login", status_code=302)
-
-#     try:
-#         # --- pending counts/qty ---
-#         # Try to get counts & sums via supabase. Some clients support .select("id", count="exact")
-#         # but we handle the common shapes and fallback to separate queries.
-#         def safe_count_and_sum(status_val=None):
-#             """
-#             Returns (count:int, qty:int) for given status (None => all)
-#             """
-#             try:
-#                 query = supabase.table("orders")
-#                 # Use explicit select to possibly get a count via returned rows
-#                 if status_val:
-#                     query = query.select("id, quantity").eq("status", status_val)
-#                 else:
-#                     query = query.select("id, quantity")
-#                 res = query.execute()
-#                 data, err = _unpack_supabase_response(res)
-#                 if err:
-#                     # fallback: try sql via rpc or return zeros
-#                     logger.warning("Count query returned error for status=%s: %s", status_val, err)
-#                     return 0, 0
-#                 rows = data or []
-#                 cnt = len(rows)
-#                 qty = sum((int(r.get("quantity") or 0) for r in rows))
-#                 return cnt, qty
-#             except Exception as e:
-#                 logger.exception("safe_count_and_sum failed for status=%s: %s", status_val, e)
-#                 return 0, 0
-
-#         pending_count, pending_qty = safe_count_and_sum("pending")
-#         shipped_count, shipped_qty = safe_count_and_sum("shipped")
-#         cancelled_count, cancelled_qty = safe_count_and_sum("cancelled")
-#         total_count, total_qty = safe_count_and_sum(None)
-
-#         # --- fetch pending orders (limited to a reasonable number, e.g. 500) ---
-#         try:
-#             res_orders = supabase.table("orders").select("*").eq("status", "pending").order("created_at", desc=True).limit(500).execute()
-#             orders_data, orders_err = _unpack_supabase_response(res_orders)
-#             if orders_err:
-#                 logger.error("Failed to fetch pending orders: %s", orders_err)
-#                 orders = []
-#             else:
-#                 orders = orders_data or []
-#         except Exception as e:
-#             logger.exception("Error fetching pending orders: %s", e)
-#             orders = []
-
-#         # ensure rows are simple dicts for the template
-#         orders = [dict(o) for o in orders]
-
-#         stats = {
-#             "orders": {
-#                 "pending": pending_count,
-#                 "shipped": shipped_count,
-#                 "cancelled": cancelled_count,
-#                 "all": total_count,
-#             },
-#             "qty": {
-#                 "pending": pending_qty,
-#                 "shipped": shipped_qty,
-#                 "cancelled": cancelled_qty,
-#                 "all": total_qty,
-#             }
-#         }
-
-#         return templates.TemplateResponse(
-#             "admin_orders.html",
-#             {
-#                 "request": request,
-#                 "stats": stats,
-#                 "orders": orders
-#             }
-#         )
-
-#     except Exception as e:
-#         logger.exception("Unhandled error in admin_dashboard: %s", e)
-#         # show a simple error page / redirect to login
-#         raise HTTPException(status_code=500, detail=f"Failed to load admin dashboard: {e}")
 
 @app.get("/admin", response_class=HTMLResponse)
 def admin_dashboard(request: Request):
@@ -1560,84 +1391,6 @@ def admin_dashboard(request: Request):
 
 # ---- Data API for the dashboard table ----
 
-# @app.get("/admin/orders")
-# def admin_list_orders(request: Request, status: str = "pending", q: str = "", page: int = 1, page_size: int = 20):
-#     require_admin(request)
-
-#     offset = max(0, (page - 1) * page_size)
-#     start = offset
-#     end = offset + page_size - 1
-
-#     try:
-#         # Start with select(*) so .eq/.range/.order exist on the returned builder
-#         query = supabase.table("orders").select("*")
-
-#         # Add filters AFTER select()
-#         if status:
-#             query = query.eq("status", status)
-
-#         # (Optional) if you want server-side text filtering and your supabase client supports ilike:
-#         # if q:
-#         #     query = query.ilike("name", f"%{q}%")  # adjust field(s) as needed
-#         # If ilike isn't available, we'll filter in-Python after fetching the page.
-
-#         # Apply ordering & pagination
-#         res = query.order("id", desc=True).range(start, end).execute()
-
-#         # Unpack response safely
-#         rows, err = _unpack_supabase_response(res)
-#         if err:
-#             logger.error("Supabase query error (list): %s", err)
-#             raise HTTPException(status_code=500, detail=f"Query failed: {err}")
-
-#         rows = rows or []
-
-#         # If user supplied q and the client doesn't support ilike, do simple filter locally:
-#         if q:
-#             q_lower = q.lower()
-#             def matches(r):
-#                 return (
-#                     (r.get("phone") and q_lower in str(r.get("phone")).lower()) or
-#                     (r.get("name") and q_lower in str(r.get("name")).lower())
-#                 )
-#             rows = [r for r in rows if matches(r)]
-
-#         # Get total count (safe, simple approach)
-#         try:
-#             count_query = supabase.table("orders").select("id")
-#             if status:
-#                 count_query = count_query.eq("status", status)
-#             count_res = count_query.execute()
-#             count_data, count_err = _unpack_supabase_response(count_res)
-#             if count_err:
-#                 logger.warning("Count query returned unexpected shape/error, falling back to page length: %s", count_err)
-#                 total = len(rows)
-#             else:
-#                 total = len(count_data or [])
-#         except Exception as ce:
-#             logger.warning("Count query failed; using page length fallback: %s", ce)
-#             total = len(rows)
-
-#     except HTTPException:
-#         # bubble up authentication / client errors
-#         raise
-#     except Exception as e:
-#         logger.exception("Unhandled error in admin_list_orders: %s", e)
-#         raise HTTPException(status_code=500, detail=f"Query failed: {e}")
-
-#     return templates.TemplateResponse(
-#         "admin_orders_filtered.html",
-#         {
-#             "request": request,
-#             "orders": [dict(r) for r in rows],
-#             "total": total,
-#             "page": page,
-#             "page_size": page_size,
-#             "status": status,
-#             "q": q
-#         }
-#     )
-
 @app.get("/admin/orders")
 def admin_list_orders(request: Request, status: str = "pending", q: str = "", page: int = 1, page_size: int = 20):
     require_admin(request)
@@ -1724,18 +1477,6 @@ def admin_list_orders(request: Request, status: str = "pending", q: str = "", pa
 
 
 
-# def get_status_counts():
-#     conn = get_conn()
-#     cur = conn.cursor()
-#     res = {}
-#     for st in ("pending", "shipped", "cancelled"):
-#         cur.execute("SELECT COUNT(*) AS c FROM orders WHERE status=%s", (st,))
-#         res[st] = cur.fetchone()["c"]
-#     cur.execute("SELECT COUNT(*) AS c FROM orders")
-#     res["all"] = cur.fetchone()["c"]
-#     conn.close()
-#     return res
-
 # -------------------------
 # get_status_counts via Supabase
 # -------------------------
@@ -1770,19 +1511,6 @@ def get_status_counts():
 
 # ---- Update status ----
 
-# @app.post("/admin/orders/{order_id}/status")
-# def admin_update_status(order_id: int, request: Request, status: str = Form(...)):
-#     require_admin(request)
-#     if status not in ("pending", "shipped", "cancelled"):
-#         raise HTTPException(status_code=400, detail="Invalid status")
-#     try:
-#         res = supabase.table("orders").update({"status": status}).eq("id", order_id).execute()
-#         if res.error:
-#             raise RuntimeError(res.error)
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"Update failed: {e}")
-#     return {"ok": True}
-
 # -------------------------
 # admin_update_status -> supabase
 # -------------------------
@@ -1809,45 +1537,6 @@ def admin_update_status(order_id: int, request: Request, status: str = Form(...)
 @app.get("/admin/ping")
 def admin_ping():
     return {"ok": True}
-
-# @app.post("/admin/orders/bulk-action")
-# async def admin_bulk_action(
-#     request: Request,
-#     action: str = Form(...),
-#     order_ids: List[int] = Form(default=[]),
-# ):
-#     if not is_logged_in(request):
-#         return RedirectResponse(url="/admin/login", status_code=303)
-
-#     if not order_ids:
-#         return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
-
-#     conn = get_conn()
-#     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-#     placeholders = ",".join("%s" for _ in order_ids)
-
-#     if action == "mark_shipped":
-#         cur.execute(f"UPDATE orders SET status='shipped' WHERE id IN ({placeholders})", order_ids)
-#         conn.commit()
-#         conn.close()
-#         return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
-
-#     elif action == "cancel":
-#         cur.execute(f"UPDATE orders SET status='cancelled' WHERE id IN ({placeholders})", order_ids)
-#         conn.commit()
-#         conn.close()
-#         return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
-
-#     elif action == "generate_labels":
-#         conn.close()
-#         # pdf_path = generate_bulk_labels(order_ids)
-#         # return FileResponse(pdf_path, media_type="application/pdf", filename=os.path.basename(pdf_path))
-#         pdf_path = generate_bulk_labels_a4(order_ids)
-#         return FileResponse(pdf_path, media_type="application/pdf", filename=os.path.basename(pdf_path))
-
-#     conn.close()
-#     return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
 
 # -------------------------
 # admin_bulk_action -> supabase
@@ -1890,17 +1579,6 @@ async def admin_bulk_action(
         raise HTTPException(status_code=500, detail=f"Bulk action failed: {e}")
 
     return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
-
-# @app.post("/admin/orders/{order_id}/cancel")
-# def admin_cancel_single(request: Request, order_id: int):
-#     if not is_logged_in(request):
-#         return RedirectResponse(url="/admin/login", status_code=303)
-#     conn = get_conn()
-#     cur = conn.cursor()
-#     cur.execute("UPDATE orders SET status='cancelled' WHERE id=%s", (order_id,))
-#     conn.commit()
-#     conn.close()
-#     return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
 
 # -------------------------
 # admin_cancel_single -> supabase
@@ -2143,3 +1821,51 @@ def admin_export_orders(request: Request, start_id: str = Form(None), fmt: str =
 def admin_export_page(request: Request):
     require_admin(request)
     return templates.TemplateResponse("admin_export.html", {"request": request})
+
+@app.get("/admin/summary", response_class=HTMLResponse)
+def admin_summary(request: Request):
+    """
+    Show summary: for each quantity value, how many orders exist with that quantity.
+    Equivalent SQL: SELECT quantity, count(id) FROM orders GROUP BY quantity ORDER BY quantity ASC
+    Implemented by fetching minimal columns and aggregating in Python for compatibility.
+    """
+    require_admin(request)
+    try:
+        # Fetch only quantity and id (lightweight)
+        res = supabase.table("orders").select("quantity, id").execute()
+        rows, err = _unpack_supabase_response(res)
+        if err:
+            logger.error("Failed to fetch orders for summary: %s", err)
+            raise HTTPException(status_code=500, detail=f"Failed to fetch data: {err}")
+
+        rows = rows or []
+
+        # Aggregate counts by quantity (safe parsing to int)
+        counts = {}
+        for r in rows:
+            try:
+                qty = int(r.get("quantity") or 0)
+            except Exception:
+                # skip malformed quantity
+                continue
+            counts[qty] = counts.get(qty, 0) + 1
+
+        # Convert to sorted list of dicts for template
+        summary = [{"quantity": q, "count": counts[q]} for q in sorted(counts.keys())]
+
+        # Also compute totals (optional)
+        total_orders = sum(item["count"] for item in summary)
+        total_items = sum(item["quantity"] * item["count"] for item in summary)
+
+        return templates.TemplateResponse("admin_summary.html", {
+            "request": request,
+            "summary": summary,
+            "total_orders": total_orders,
+            "total_items": total_items
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Unhandled error in admin_summary: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to load summary: {e}")

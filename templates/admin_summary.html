@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <h1>Orders Summary by Quantity</h1>
+
+  <div class="controls">
+    <a class="btn" href="/admin">Back to Dashboard</a>
+    <form method="post" action="/admin/export-orders" style="display:inline;">
+      <!-- pre-fill export to include everything; admin can adjust start_id on the export page -->
+      <input type="hidden" name="fmt" value="xlsx">
+      <button class="btn outline" type="submit">Export as XLSX</button>
+    </form>
+  </div>
+
+  <div style="margin-top:12px;">
+    <table class="orders">
+      <thead>
+        <tr>
+          <th>Quantity</th>
+          <th>Order Count</th>
+          <th>Items (quantity × count)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if summary and summary|length > 0 %}
+          {% for row in summary %}
+            <tr>
+              <td>{{ row.quantity }}</td>
+              <td>{{ row.count }}</td>
+              <td>{{ row.quantity * row.count }}</td>
+            </tr>
+          {% endfor %}
+          <tr style="font-weight:bold; background:#f9f9f9;">
+            <td>Total</td>
+            <td>{{ total_orders }}</td>
+            <td>{{ total_items }}</td>
+          </tr>
+        {% else %}
+          <tr>
+            <td colspan="3">No orders found.</td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}
