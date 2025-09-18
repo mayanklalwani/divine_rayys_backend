@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <h1>Duplicate Orders (by addressline1)</h1>
+
+  <div class="controls" style="margin-bottom:12px;">
+    <a class="btn" href="/admin">Back to Dashboard</a>
+    <a class="btn outline" href="/admin/duplicates?limit=100">Show first 100</a>
+  </div>
+
+  {% if total_dup_addresses == 0 %}
+    <p>No duplicate addresses found.</p>
+  {% else %}
+    <p>Found <strong>{{ total_dup_addresses }}</strong> duplicate address(es) with <strong>{{ total_rows }}</strong> total rows.</p>
+
+    {% for key, group in groups.items() %}
+      <section style="margin-top:18px; border:1px solid #eee; padding:10px; border-radius:6px;">
+        <h3 style="margin:0 0 8px 0;">{{ group.display_address }} <small style="color:#666;">({{ group.rows|length }} rows)</small></h3>
+
+        <table class="orders">
+          <thead>
+            <tr>
+              {% for col in group.rows[0].keys() %}
+                <th>{{ col }}</th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in group.rows %}
+              <tr>
+                {% for col in row.keys() %}
+                  <td style="max-width:350px; white-space:normal; word-break:break-word;">{{ row[col] }}</td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+    {% endfor %}
+  {% endif %}
+{% endblock %}

@@ -14,6 +14,7 @@ import uvicorn
 import logging
 from urllib.parse import quote_plus, urlparse, urlunparse
 from app.routes.debug import router as debug_router
+from fastapi import Query
 
 logging.basicConfig(
     level=getattr(logging, "INFO", logging.INFO),
@@ -1330,7 +1331,7 @@ def admin_dashboard(request: Request):
 
         # fetch pending orders
         try:
-            res_orders = supabase.table("orders").select("*").eq("status", "pending").order("created_at", desc=True).limit(500).execute()
+            res_orders = supabase.table("orders").select("*").eq("status", "pending").order("created_at", desc=True).limit(5000).execute()
             orders_data, orders_err = _unpack_supabase_response(res_orders)
             if orders_err:
                 logger.error("Failed to fetch pending orders: %s", orders_err)
@@ -1822,17 +1823,65 @@ def admin_export_page(request: Request):
     require_admin(request)
     return templates.TemplateResponse("admin_export.html", {"request": request})
 
+# @app.get("/admin/summary", response_class=HTMLResponse)
+# def admin_summary(request: Request):
+#     """
+#     Show summary: for each quantity value, how many orders exist with that quantity.
+#     Equivalent SQL: SELECT quantity, count(id) FROM orders GROUP BY quantity ORDER BY quantity ASC
+#     Implemented by fetching minimal columns and aggregating in Python for compatibility.
+#     """
+#     require_admin(request)
+#     try:
+#         # Fetch only quantity and id (lightweight)
+#         res = supabase.table("orders").select("quantity, id").execute()
+#         rows, err = _unpack_supabase_response(res)
+#         if err:
+#             logger.error("Failed to fetch orders for summary: %s", err)
+#             raise HTTPException(status_code=500, detail=f"Failed to fetch data: {err}")
+
+#         rows = rows or []
+
+#         # Aggregate counts by quantity (safe parsing to int)
+#         counts = {}
+#         for r in rows:
+#             try:
+#                 qty = int(r.get("quantity") or 0)
+#             except Exception:
+#                 # skip malformed quantity
+#                 continue
+#             counts[qty] = counts.get(qty, 0) + 1
+
+#         # Convert to sorted list of dicts for template
+#         summary = [{"quantity": q, "count": counts[q]} for q in sorted(counts.keys())]
+
+#         # Also compute totals (optional)
+#         total_orders = sum(item["count"] for item in summary)
+#         total_items = sum(item["quantity"] * item["count"] for item in summary)
+
+#         return templates.TemplateResponse("admin_summary.html", {
+#             "request": request,
+#             "summary": summary,
+#             "total_orders": total_orders,
+#             "total_items": total_items
+#         })
+
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.exception("Unhandled error in admin_summary: %s", e)
+#         raise HTTPException(status_code=500, detail=f"Failed to load summary: {e}")
+
 @app.get("/admin/summary", response_class=HTMLResponse)
 def admin_summary(request: Request):
     """
-    Show summary: for each quantity value, how many orders exist with that quantity.
-    Equivalent SQL: SELECT quantity, count(id) FROM orders GROUP BY quantity ORDER BY quantity ASC
-    Implemented by fetching minimal columns and aggregating in Python for compatibility.
+    Show summary: for each quantity value, how many orders exist with that quantity,
+    separated into pending, shipped, and total tables. Also include comma-separated
+    order ids for groups where quantity > 1 AND count > 1.
     """
     require_admin(request)
     try:
-        # Fetch only quantity and id (lightweight)
-        res = supabase.table("orders").select("quantity, id").execute()
+        # Fetch quantity, id and status (lightweight)
+        res = supabase.table("orders").select("quantity, id, status").execute()
         rows, err = _unpack_supabase_response(res)
         if err:
             logger.error("Failed to fetch orders for summary: %s", err)
@@ -1840,28 +1889,80 @@ def admin_summary(request: Request):
 
         rows = rows or []
 
-        # Aggregate counts by quantity (safe parsing to int)
-        counts = {}
+        def new_counter():
+            return {"count": 0, "ids": []}
+
+        counts_pending = {}
+        counts_shipped = {}
+        counts_total = {}
+
         for r in rows:
+            # parse quantity safely to int; if malformed, skip
             try:
                 qty = int(r.get("quantity") or 0)
             except Exception:
-                # skip malformed quantity
                 continue
-            counts[qty] = counts.get(qty, 0) + 1
 
-        # Convert to sorted list of dicts for template
-        summary = [{"quantity": q, "count": counts[q]} for q in sorted(counts.keys())]
+            oid = r.get("id")
+            oid_str = str(oid) if oid is not None else None
+            status = (r.get("status") or "").lower().strip()
 
-        # Also compute totals (optional)
-        total_orders = sum(item["count"] for item in summary)
-        total_items = sum(item["quantity"] * item["count"] for item in summary)
+            def add_to(counts_dict):
+                if qty not in counts_dict:
+                    counts_dict[qty] = new_counter()
+                counts_dict[qty]["count"] += 1
+                if oid_str:
+                    counts_dict[qty]["ids"].append(oid_str)
+
+            add_to(counts_total)
+
+            if status == "pending":
+                add_to(counts_pending)
+            elif status == "shipped":
+                add_to(counts_shipped)
+
+        # 🔑 UPDATED FUNCTION
+        def make_summary_list(counts_dict):
+            out = []
+            for q in sorted(counts_dict.keys()):
+                entry = counts_dict[q]
+                ids_str = ""
+                # Only include ids if BOTH quantity > 1 and count > 1
+                if q > 1  and entry["ids"]:
+                    seen = set()
+                    unique_ids = []
+                    for i in entry["ids"]:
+                        if i not in seen:
+                            seen.add(i)
+                            unique_ids.append(i)
+                    ids_str = ",".join(unique_ids)
+                out.append({"quantity": q, "count": entry["count"], "ids": ids_str})
+            return out
+
+        pending_summary = make_summary_list(counts_pending)
+        shipped_summary = make_summary_list(counts_shipped)
+        total_summary = make_summary_list(counts_total)
+
+        def compute_totals(summary_list):
+            total_orders = sum(item["count"] for item in summary_list)
+            total_items = sum(item["quantity"] * item["count"] for item in summary_list)
+            return total_orders, total_items
+
+        pending_total_orders, pending_total_items = compute_totals(pending_summary)
+        shipped_total_orders, shipped_total_items = compute_totals(shipped_summary)
+        total_total_orders, total_total_items = compute_totals(total_summary)
 
         return templates.TemplateResponse("admin_summary.html", {
             "request": request,
-            "summary": summary,
-            "total_orders": total_orders,
-            "total_items": total_items
+            "pending_summary": pending_summary,
+            "pending_total_orders": pending_total_orders,
+            "pending_total_items": pending_total_items,
+            "shipped_summary": shipped_summary,
+            "shipped_total_orders": shipped_total_orders,
+            "shipped_total_items": shipped_total_items,
+            "total_summary": total_summary,
+            "total_total_orders": total_total_orders,
+            "total_total_items": total_total_items,
         })
 
     except HTTPException:
@@ -1869,3 +1970,63 @@ def admin_summary(request: Request):
     except Exception as e:
         logger.exception("Unhandled error in admin_summary: %s", e)
         raise HTTPException(status_code=500, detail=f"Failed to load summary: {e}")
+
+
+
+@app.get("/admin/duplicates", response_class=HTMLResponse)
+def admin_duplicates(request: Request, limit: int = Query(None, description="Optional limit of rows to display")):
+    """
+    Show duplicate orders using the database view `orders_duplicates`.
+    The view should return all order rows whose addressline1 appears more than once.
+    Groups are returned keyed by normalized addressline1, with `display_address` and list of rows.
+    """
+    require_admin(request)
+    try:
+        # Query the view which returns only duplicate rows (server-side)
+        res = supabase.table("orders_duplicates").select("*").order("addressline1").execute()
+        rows, err = _unpack_supabase_response(res)
+        if err:
+            logger.error("Failed to fetch duplicate rows from view orders_duplicates: %s", err)
+            raise HTTPException(status_code=500, detail=f"Failed to fetch data: {err}")
+
+        rows = rows or []
+
+        # Group rows by normalized addressline1 (normalize by trim + lower)
+        groups = {}
+        for r in rows:
+            addr = (r.get("addressline1") or "").strip()
+            if not addr:
+                # place empty addresses under a special key if you want; skip for now
+                key = "__EMPTY__"
+            else:
+                key = addr.lower()
+            # Use the first-seen original address for display
+            if key not in groups:
+                groups[key] = {"display_address": addr or "(blank)", "rows": []}
+            groups[key]["rows"].append(r)
+
+        total_rows = sum(len(g["rows"]) for g in groups.values())
+
+        # Apply optional limit: trim rows across groups (simple per-group trim until limit exhausted)
+        if limit is not None and limit > 0:
+            remaining = limit
+            for key in list(groups.keys()):
+                if remaining <= 0:
+                    groups[key]["rows"] = []
+                else:
+                    if len(groups[key]["rows"]) > remaining:
+                        groups[key]["rows"] = groups[key]["rows"][:remaining]
+                    remaining -= len(groups[key]["rows"])
+
+        return templates.TemplateResponse("duplicates.html", {
+            "request": request,
+            "groups": groups,
+            "total_dup_addresses": len([k for k in groups.keys() if groups[k]["rows"]]),  # count groups with at least 1 row
+            "total_rows": total_rows,
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Unhandled error in admin_duplicates: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to load duplicates: {e}")

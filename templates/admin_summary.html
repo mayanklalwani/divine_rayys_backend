@@ -3,41 +3,115 @@
 {% block content %}
   <h1>Orders Summary by Quantity</h1>
 
-  <div class="controls">
+  <div class="controls" style="display:flex; gap:8px; align-items:center;">
     <a class="btn" href="/admin">Back to Dashboard</a>
     <form method="post" action="/admin/export-orders" style="display:inline;">
-      <!-- pre-fill export to include everything; admin can adjust start_id on the export page -->
       <input type="hidden" name="fmt" value="xlsx">
       <button class="btn outline" type="submit">Export as XLSX</button>
     </form>
   </div>
 
   <div style="margin-top:12px;">
+    <!-- PENDING -->
+    <h2>Pending Orders</h2>
     <table class="orders">
       <thead>
         <tr>
           <th>Quantity</th>
           <th>Order Count</th>
           <th>Items (quantity × count)</th>
+          <th>Order IDs</th>
         </tr>
       </thead>
       <tbody>
-        {% if summary and summary|length > 0 %}
-          {% for row in summary %}
+        {% if pending_summary and pending_summary|length > 0 %}
+          {% for row in pending_summary %}
             <tr>
               <td>{{ row.quantity }}</td>
               <td>{{ row.count }}</td>
               <td>{{ row.quantity * row.count }}</td>
+              <td>{% if row.ids %}{{ row.ids }}{% else %}&nbsp;{% endif %}</td>
             </tr>
           {% endfor %}
           <tr style="font-weight:bold; background:#f9f9f9;">
             <td>Total</td>
-            <td>{{ total_orders }}</td>
-            <td>{{ total_items }}</td>
+            <td>{{ pending_total_orders }}</td>
+            <td>{{ pending_total_items }}</td>
+            <td>&nbsp;</td>
           </tr>
         {% else %}
           <tr>
-            <td colspan="3">No orders found.</td>
+            <td colspan="4">No pending orders found.</td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+
+    <!-- SHIPPED -->
+    <h2 style="margin-top:18px;">Shipped Orders</h2>
+    <table class="orders">
+      <thead>
+        <tr>
+          <th>Quantity</th>
+          <th>Order Count</th>
+          <th>Items (quantity × count)</th>
+          <th>Order IDs</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if shipped_summary and shipped_summary|length > 0 %}
+          {% for row in shipped_summary %}
+            <tr>
+              <td>{{ row.quantity }}</td>
+              <td>{{ row.count }}</td>
+              <td>{{ row.quantity * row.count }}</td>
+              <td>{% if row.ids %}{{ row.ids }}{% else %}&nbsp;{% endif %}</td>
+            </tr>
+          {% endfor %}
+          <tr style="font-weight:bold; background:#f9f9f9;">
+            <td>Total</td>
+            <td>{{ shipped_total_orders }}</td>
+            <td>{{ shipped_total_items }}</td>
+            <td>&nbsp;</td>
+          </tr>
+        {% else %}
+          <tr>
+            <td colspan="4">No shipped orders found.</td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+
+    <!-- TOTAL -->
+    <h2 style="margin-top:18px;">All Orders (Total)</h2>
+    <table class="orders">
+      <thead>
+        <tr>
+          <th>Quantity</th>
+          <th>Order Count</th>
+          <th>Items (quantity × count)</th>
+          <th>Order IDs</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if total_summary and total_summary|length > 0 %}
+          {% for row in total_summary %}
+            <tr>
+              <td>{{ row.quantity }}</td>
+              <td>{{ row.count }}</td>
+              <td>{{ row.quantity * row.count }}</td>
+              <td>{% if row.ids %}{{ row.ids }}{% else %}&nbsp;{% endif %}</td>
+            </tr>
+          {% endfor %}
+          <tr style="font-weight:bold; background:#f9f9f9;">
+            <td>Total</td>
+            <td>{{ total_total_orders }}</td>
+            <td>{{ total_total_items }}</td>
+            <td>&nbsp;</td>
+          </tr>
+        {% else %}
+          <tr>
+            <td colspan="4">No orders found.</td>
           </tr>
         {% endif %}
       </tbody>
