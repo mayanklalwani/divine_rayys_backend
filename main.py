@@ -2069,3 +2069,129 @@ def admin_duplicates(request: Request, limit: int = Query(None, description="Opt
     except Exception as e:
         logger.exception("Unhandled error in admin_duplicates: %s", e)
         raise HTTPException(status_code=500, detail=f"Failed to load duplicates: {e}")
+
+@app.get("/admin/group", response_class=HTMLResponse)
+def admin_group_page(request: Request, start_id: str = None, end_id: str = None, group_by: str = "quantity"):
+    """
+    Defensive grouping endpoint. Uses 'rows' key (not 'items') to avoid colliding with dict.items method.
+    """
+    require_admin(request)
+
+    group_by = (group_by or "quantity").lower()
+    if group_by not in ("quantity", "city"):
+        group_by = "quantity"
+
+    debug_note = None
+
+    try:
+        # find helper
+        helper = globals().get("_fetch_export_rows")
+        if helper is None:
+            logger.error("_fetch_export_rows not found in globals()")
+            debug_note = "_fetch_export_rows not found"
+            rows = []
+        elif not callable(helper):
+            logger.error("_fetch_export_rows exists but is not callable. type=%s repr=%s", type(helper), repr(helper)[:400])
+            debug_note = f"_fetch_export_rows exists but is not callable (type={type(helper).__name__})"
+            try:
+                rows = list(helper)
+            except Exception:
+                rows = []
+        else:
+            try:
+                rows = helper(start_id=start_id if start_id not in ("", None) else None,
+                              end_id=end_id if end_id not in ("", None) else None)
+            except TypeError:
+                # fallback to positional if signature differs
+                try:
+                    rows = helper(start_id, end_id)
+                except Exception as e:
+                    logger.exception("Calling _fetch_export_rows failed: %s", e)
+                    rows = []
+            except Exception as e:
+                logger.exception("Calling _fetch_export_rows failed: %s", e)
+                rows = []
+
+        # defensive normalization
+        if callable(rows):
+            try:
+                rows = rows()
+            except Exception:
+                debug_note = "Returned callable could not be invoked; coerced to empty list."
+                rows = []
+
+        if rows is None:
+            rows = []
+
+        if isinstance(rows, dict):
+            rows = [rows]
+
+        if not isinstance(rows, (list, tuple)):
+            try:
+                rows = list(rows)
+            except Exception:
+                logger.warning("Unable to coerce rows to list; type=%s repr=%s", type(rows), repr(rows)[:400])
+                debug_note = f"Unexpected rows type: {type(rows).__name__}; coerced to empty list."
+                rows = []
+
+        # Build groups using "rows" key (avoid name collision with dict.items)
+        groups = {}
+        for r in rows:
+            try:
+                get = r.get if isinstance(r, dict) else lambda k, d=None: getattr(r, k, d)
+                raw_id = get("id", None)
+                try:
+                    oid = int(raw_id) if raw_id is not None else None
+                except Exception:
+                    oid = raw_id
+
+                if group_by == "city":
+                    key_raw = get("city", "(blank)") or "(blank)"
+                    key = key_raw.strip() if isinstance(key_raw, str) else str(key_raw)
+                else:
+                    qv = get("quantity", 0)
+                    try:
+                        key = int(qv)
+                    except Exception:
+                        try:
+                            key = int(str(qv).strip())
+                        except Exception:
+                            key = 0
+
+                key_display = str(key)
+                if key_display not in groups:
+                    groups[key_display] = {"key": key_display, "rows": []}
+
+                groups[key_display]["rows"].append({
+                    "id": oid if oid is not None else raw_id,
+                    "name": get("name", "") or "",
+                    "quantity": get("quantity", 0) or 0
+                })
+            except Exception as e:
+                logger.exception("Failed processing row for grouping: %s; row_repr=%s", e, repr(r)[:300])
+                # skip bad row
+
+        # sort groups
+        if group_by == "quantity":
+            sorted_keys = sorted(groups.keys(), key=lambda x: int(x) if str(x).lstrip("-").isdigit() else 0)
+        else:
+            sorted_keys = sorted(groups.keys(), key=lambda x: (x or "").lower())
+
+        sorted_groups = [groups[k] for k in sorted_keys]
+        total_rows = len(rows)
+
+        return templates.TemplateResponse("admin_group.html", {
+            "request": request,
+            "groups": sorted_groups,
+            "start_id": start_id or "",
+            "end_id": end_id or "",
+            "group_by": group_by,
+            "total_rows": total_rows,
+            "debug_note": debug_note,
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("admin_group_page failed (unexpected): %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to group orders: {e}")

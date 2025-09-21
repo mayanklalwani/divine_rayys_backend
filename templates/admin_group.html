@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Group Orders (pending/shipped)</h2>
+
+{% if debug_note %}
+  <p style="color:#a00; font-size:0.9em;">Debug: {{ debug_note }}</p>
+{% endif %}
+
+<form id="groupForm" method="get" action="/admin/group" style="margin-bottom:12px;">
+  <div class="controls" style="display:flex; gap:12px; align-items:end; flex-wrap:wrap;">
+    <div style="display:flex; flex-direction:column;">
+      <label for="start_id">Starting S.No (optional)</label>
+      <input type="number" id="start_id" name="start_id" min="1" placeholder="e.g. 100" style="width:160px;" value="{{ start_id }}">
+    </div>
+
+    <div style="display:flex; flex-direction:column;">
+      <label for="end_id">Ending S.No (optional)</label>
+      <input type="number" id="end_id" name="end_id" min="1" placeholder="e.g. 250" style="width:160px;" value="{{ end_id }}">
+    </div>
+
+    <div style="display:flex; flex-direction:column;">
+      <label for="group_by">Group By</label>
+      <select id="group_by" name="group_by" style="width:140px;">
+        <option value="quantity" {% if group_by == 'quantity' %}selected{% endif %}>Quantity</option>
+        <option value="city" {% if group_by == 'city' %}selected{% endif %}>City</option>
+      </select>
+    </div>
+
+    <div>
+      <button type="submit" class="btn">Show</button>
+    </div>
+  </div>
+</form>
+
+<p style="color:#666; font-size:0.9em;">Showing {{ total_rows }} order(s) matching status pending/shipped {% if start_id or end_id %} and id range {% if start_id %}≥ {{ start_id }}{% endif %}{% if end_id %}{% if start_id %} and {% endif %}≤ {{ end_id }}{% endif %}{% endif %} — grouped by <b>{{ group_by }}</b>.</p>
+
+<hr style="margin:8px 0 16px 0;">
+
+{% if not groups %}
+  <p>No orders found for given criteria.</p>
+{% else %}
+  {% for g in groups %}
+    <section style="margin-bottom:18px;">
+      <h3 style="margin:6px 0;">Group: <span style="color:#2c7be5;">{{ g.key }}</span> ({{ g.rows|length }} orders)</h3>
+
+      <table class="orders">
+        <thead>
+          <tr>
+            <th style="width:90px;">ID</th>
+            <th>Name</th>
+            <th style="width:90px;">Qty</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for it in g.rows %}
+            <tr>
+              <td>{{ it.id }}</td>
+              <td>{{ it.name }}</td>
+              <td style="text-align:center;">{{ it.quantity or 0 }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  {% endfor %}
+{% endif %}
+
+<script>
+  // client guard: ensure start <= end if both provided
+  document.getElementById('groupForm').addEventListener('submit', function (e) {
+    const s = document.getElementById('start_id').value ? parseInt(document.getElementById('start_id').value, 10) : null;
+    const en = document.getElementById('end_id').value ? parseInt(document.getElementById('end_id').value, 10) : null;
+    if (s !== null && en !== null && s > en) {
+      e.preventDefault();
+      alert("Starting S.No must be less than or equal to Ending S.No.");
+      return false;
+    }
+  });
+</script>
+{% endblock %}
