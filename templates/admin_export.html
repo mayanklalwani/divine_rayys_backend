@@ -4,26 +4,57 @@
 <h2>Export Orders (pending/shipped)</h2>
 
 <form id="exportForm" class="export-form" method="post" action="/admin/export-orders">
-  <div class="controls">
-    <label for="start_id">Starting S.No (optional)</label>
-    <input type="number" id="start_id" name="start_id" min="1" placeholder="e.g. 100" style="width:140px;">
+  <div class="controls" style="display:flex; gap:12px; align-items:end; flex-wrap:wrap;">
+    <div style="display:flex; flex-direction:column;">
+      <label for="start_id">Starting S.No (optional)</label>
+      <input type="number" id="start_id" name="start_id" min="1" placeholder="e.g. 100" style="width:160px;">
+    </div>
 
-    <label for="fmt">Format</label>
-    <select id="fmt" name="fmt" style="width:120px;">
-      <option value="pdf" selected>PDF</option>
-      <option value="xlsx">XLSX</option>
-    </select>
+    <div style="display:flex; flex-direction:column;">
+      <label for="end_id">Ending S.No (optional)</label>
+      <input type="number" id="end_id" name="end_id" min="1" placeholder="e.g. 250" style="width:160px;">
+    </div>
 
-    <button type="submit" class="btn">Download</button>
+    <div style="display:flex; flex-direction:column;">
+      <label for="fmt">Format</label>
+      <select id="fmt" name="fmt" style="width:120px;">
+        <option value="pdf" selected>PDF</option>
+        <option value="xlsx">XLSX</option>
+      </select>
+    </div>
+
+    <div>
+      <button type="submit" class="btn">Download</button>
+    </div>
   </div>
 </form>
 
 <p style="font-size:0.9em; color:#666; margin-top:8px;">
   Only orders with status <b>pending</b> or <b>shipped</b> will be exported.  
-  If Starting S.No is set, only orders with ID ≥ Starting S.No are included.
+  If <b>Starting S.No</b> is set, only orders with ID ≥ Starting S.No are included.
+  If <b>Ending S.No</b> is set, only orders with ID ≤ Ending S.No are included.
+</p>
+
+<p style="font-size:0.9em; color:#666; margin-top:4px;">
+  The export now includes a <b>Quantity</b> column for each order.
 </p>
 
 <script>
-  // optional: you can add helpers here for filling start_id automatically
+  // Client-side validation: if both start and end provided, ensure start <= end.
+  document.getElementById('exportForm').addEventListener('submit', function (e) {
+    const startEl = document.getElementById('start_id');
+    const endEl = document.getElementById('end_id');
+    const s = startEl.value ? parseInt(startEl.value, 10) : null;
+    const en = endEl.value ? parseInt(endEl.value, 10) : null;
+
+    if (s !== null && en !== null && s > en) {
+      e.preventDefault();
+      alert("Starting S.No must be less than or equal to Ending S.No.");
+      startEl.focus();
+      return false;
+    }
+
+    return true;
+  });
 </script>
 {% endblock %}

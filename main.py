@@ -1407,7 +1407,8 @@ def admin_list_orders(request: Request, status: str = "pending", q: str = "", pa
             query = query.eq("status", status)
 
         # Apply ordering & pagination (range uses start/end inclusive)
-        res = query.order("id", desc=True).range(start, end).execute()
+        # res = query.order("id", desc=True).range(start, end).execute()
+        res = query.order("id", desc=True).execute()
 
         rows, err = _unpack_supabase_response(res)
         if err:
@@ -1656,26 +1657,32 @@ if __name__ == "__main__":
     )
 
 # ---------- New helper: fetch export rows ----------
-def _fetch_export_rows(start_id=None):
+def _fetch_export_rows(start_id=None, end_id=None):
     """
-    Return list of dict rows where status in ('pending','shipped') and id >= start_id if provided.
-    Each row: {'id': ..., 'name': ..., 'city': ...}
+    Return list of dict rows where status in ('pending','shipped') and id between start_id and end_id (inclusive)
+    if provided. Each row: {'id': ..., 'name': ..., 'city': ..., 'quantity': ...}
     """
     try:
-        q = supabase.table("orders").select("id, name, city, status")
-        # Only pending or shipped
-        # supabase-py doesn't have .in_ everywhere; many versions support .in_('status', ['pending','shipped'])
+        q = supabase.table("orders").select("id, name, city, status, quantity")
+
+        # Only pending or shipped (try server-side .in_ if available)
         try:
             q = q.in_("status", ["pending", "shipped"])
         except Exception:
-            # fallback: fetch all and filter below
+            # client may not support in_ - we'll filter later
             pass
 
-        if start_id:
+        # Apply start_id / end_id filters server-side if supported
+        if start_id not in (None, "",):
             try:
                 q = q.gte("id", int(start_id))
             except Exception:
-                # if client lacks gte, we'll filter after fetch
+                pass
+
+        if end_id not in (None, "",):
+            try:
+                q = q.lte("id", int(end_id))
+            except Exception:
                 pass
 
         # ordering by id ascending
@@ -1686,7 +1693,7 @@ def _fetch_export_rows(start_id=None):
             raise RuntimeError(err)
         rows = data or []
 
-        # final safety filtering for client versions without in_/gte
+        # final safety filtering for client versions without in_/gte/lte
         filtered = []
         for r in rows:
             try:
@@ -1696,13 +1703,24 @@ def _fetch_export_rows(start_id=None):
                 continue
             if st not in ("pending", "shipped"):
                 continue
-            if start_id is not None:
+            if start_id not in (None, ""):
                 try:
                     if oid < int(start_id):
                         continue
                 except Exception:
                     pass
-            filtered.append({"id": oid, "name": r.get("name") or "", "city": r.get("city") or ""})
+            if end_id not in (None, ""):
+                try:
+                    if oid > int(end_id):
+                        continue
+                except Exception:
+                    pass
+            # ensure quantity present (int fallback 0)
+            try:
+                qty = int(r.get("quantity") or 0)
+            except Exception:
+                qty = 0
+            filtered.append({"id": oid, "name": r.get("name") or "", "city": r.get("city") or "", "quantity": qty})
         return filtered
     except Exception as e:
         logger.exception("Failed to fetch export rows: %s", e)
@@ -1710,13 +1728,15 @@ def _fetch_export_rows(start_id=None):
 
 # ---------- New endpoint: export orders ----------
 @app.post("/admin/export-orders")
-def admin_export_orders(request: Request, start_id: str = Form(None), fmt: str = Form("pdf")):
+@app.post("/admin/export-orders")
+def admin_export_orders(request: Request, start_id: str = Form(None), end_id: str = Form(None), fmt: str = Form("pdf")):
     """
     Admin-only endpoint that creates a PDF or XLSX of orders with columns:
-      S.No (order.id), Name, City, Dispatched (blank), Received (blank)
+      S.No (order.id), Name, City, Quantity, Dispatched (blank), Received (blank)
 
     Form params:
       start_id (optional): if set, only orders with id >= start_id are exported
+      end_id (optional): if set, only orders with id <= end_id are exported
       fmt: 'pdf' or 'xlsx'
     """
     require_admin(request)
@@ -1725,16 +1745,26 @@ def admin_export_orders(request: Request, start_id: str = Form(None), fmt: str =
     if fmt not in ("pdf", "xlsx"):
         raise HTTPException(status_code=400, detail="Unsupported format. Use 'pdf' or 'xlsx'.")
 
-    try:
-        rows = _fetch_export_rows(start_id=start_id if start_id not in ("", None) else None)
+    # Normalize empty strings to None
+    if start_id in ("", None):
+        start_val = None
+    else:
+        start_val = start_id
 
-        # If no rows, still return empty file with header
-        # Build table data: headers + rows
+    if end_id in ("", None):
+        end_val = None
+    else:
+        end_val = end_id
+
+    try:
+        rows = _fetch_export_rows(start_id=start_val, end_id=end_val)
+
+        # Build table data: headers + rows (added Quantity column)
         table_data = []
-        headers = ["S.No", "Name", "City", "Dispatched", "Received"]
+        headers = ["S.No", "Name", "City", "Quantity", "Dispatched", "Received"]
         table_data.append(headers)
         for r in rows:
-            table_data.append([r["id"], r["name"], r["city"], "", ""])
+            table_data.append([r["id"], r["name"], r["city"], r.get("quantity", 0), "", ""])
 
         # Temporary file path
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1747,14 +1777,21 @@ def admin_export_orders(request: Request, start_id: str = Form(None), fmt: str =
             doc = SimpleDocTemplate(pdf_path, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=18 * mm, bottomMargin=18 * mm)
             story = []
             styles = getSampleStyleSheet()
-            title = Paragraph(f"Orders Export (status: pending/shipped){' — starting id >= ' + str(start_id) if start_id else ''}", styles["Heading2"])
+            range_desc = ""
+            if start_val and end_val:
+                range_desc = f" — id between {start_val} and {end_val}"
+            elif start_val:
+                range_desc = f" — starting id >= {start_val}"
+            elif end_val:
+                range_desc = f" — up to id <= {end_val}"
+            title = Paragraph(f"Orders Export (status: pending/shipped){range_desc}", styles["Heading2"])
             story.append(title)
             story.append(Spacer(1, 6))
 
-            # Column width heuristics: S.No narrow, Name wider, City medium, Dispatched/Received narrow
+            # Column width heuristics: S.No narrow, Name wider, City medium, Quantity narrow, Dispatched/Received narrow
             page_w, _ = A4
             usable_w = page_w - (18 * mm + 18 * mm)
-            col_widths = [30 * mm, usable_w * 0.45, usable_w * 0.25, usable_w * 0.10, usable_w * 0.10]
+            col_widths = [22 * mm, usable_w * 0.40, usable_w * 0.22, 18 * mm, usable_w * 0.10, usable_w * 0.10]
 
             t = Table(table_data, colWidths=col_widths, repeatRows=1)
             t_style = TableStyle([
@@ -1798,15 +1835,17 @@ def admin_export_orders(request: Request, start_id: str = Form(None), fmt: str =
                 ws.cell(row=row_idx, column=1, value=r["id"]).border = border
                 ws.cell(row=row_idx, column=2, value=r["name"]).border = border
                 ws.cell(row=row_idx, column=3, value=r["city"]).border = border
-                ws.cell(row=row_idx, column=4, value="").border = border
+                ws.cell(row=row_idx, column=4, value=r.get("quantity", 0)).border = border
                 ws.cell(row=row_idx, column=5, value="").border = border
+                ws.cell(row=row_idx, column=6, value="").border = border
 
             # column widths (approx)
             ws.column_dimensions["A"].width = 8   # S.No
             ws.column_dimensions["B"].width = 35  # Name
             ws.column_dimensions["C"].width = 20  # City
-            ws.column_dimensions["D"].width = 12  # Dispatched
-            ws.column_dimensions["E"].width = 12  # Received
+            ws.column_dimensions["D"].width = 10  # Quantity
+            ws.column_dimensions["E"].width = 12  # Dispatched
+            ws.column_dimensions["F"].width = 12  # Received
 
             wb.save(xlsx_path)
             filename = f"orders_{ts}.xlsx"
