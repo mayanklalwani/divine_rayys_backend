@@ -1,7 +1,5 @@
 import hashlib
 import sys
-import psycopg2
-import psycopg2.extras
 from supabase import create_client, Client
 from math import floor
 from reportlab.lib.units import mm
@@ -254,6 +252,52 @@ def _unpack_supabase_response(res):
         info = {"type": str(type(res))}
     return None, f"Unexpected Supabase response shape: {info}"
 
+# ---------- Helper: iterate orders in chunks to avoid Supabase "1000 row" limit ----------
+def _iter_orders_chunks(select_cols="id,quantity,status", chunk_size=1000, order_desc=False, status_filter=None):
+    """
+    Generator that yields lists of rows (chunks) from the orders table.
+    Uses .range(start, end) to page through results. Falls back to a single .execute() if .range isn't available.
+    """
+    start = 0
+    while True:
+        # build base query
+        q = supabase.table("orders").select(select_cols)
+        if status_filter:
+            try:
+                q = q.eq("status", status_filter)
+            except Exception:
+                # client might not support eq in chained fashion; ignore
+                pass
+        q = q.order("id", desc=order_desc)
+        try:
+            q = q.range(start, start + chunk_size - 1)
+            res = q.execute()
+        except Exception:
+            # fallback to no-range (may be limited by server/client)
+            res = q.execute()
+
+        data, err = _unpack_supabase_response(res)
+        if err:
+            raise RuntimeError(f"Supabase chunk fetch failed: {err}")
+
+        rows = data or []
+        if not rows:
+            break
+
+        yield rows
+
+        # if returned less than chunk_size, we've reached the end
+        if len(rows) < chunk_size:
+            break
+        start += chunk_size
+
+def _count_rows(status=None, chunk_size=1000):
+    """Return total row count, optionally filtered by status, by iterating chunks."""
+    total = 0
+    for chunk in _iter_orders_chunks(select_cols="id,status", chunk_size=chunk_size, status_filter=status):
+        total += len(chunk)
+    return total
+
 def _extract_public_url_from_response(pub_res):
     """
     Return a URL string from various shapes:
@@ -352,94 +396,6 @@ HOST = os.getenv("host", "db.zjgzqudobxmqgulyhgft.supabase.co")
 PORT = os.getenv("port", "5432")
 DBNAME = os.getenv("dbname", "postgres")
 
-def get_conn():
-    """
-    IPv4-first DB connector:
-     - Try all IPv4 addresses for HOST first (connect to IPv4 literal).
-     - If IPv4 attempts fail, try connecting using the hostname (system default).
-     - Finally try IPv6 addresses (explicit) before giving up.
-    """
-    connect_timeout = int(os.getenv("DB_CONNECT_TIMEOUT", "10"))
-
-    user = USER
-    password = PASSWORD
-    host = HOST
-    port = int(PORT or 5432)
-    dbname = DBNAME
-
-    last_exc = None
-
-    # 1) Resolve IPv4 addresses and try them first
-    try:
-        infos4 = socket.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM)
-    except socket.gaierror as e:
-        infos4 = []
-        logger.error("IPv4 resolution failed for %s: %s", host, e)
-
-    if infos4:
-        for info in infos4:
-            ipv4 = info[4][0]
-            try:
-                logger.info("Attempting connect to IPv4 %s:%s", ipv4, port)
-                return psycopg2.connect(
-                    user=user,
-                    password=password,
-                    host=ipv4,
-                    port=str(port),
-                    dbname=dbname,
-                    connect_timeout=connect_timeout,
-                    sslmode="require",
-                )
-            except Exception as e:
-                logger.warning("Connect to IPv4 %s failed: %s", ipv4, e)
-                last_exc = e
-
-    # 2) Fall back to hostname (let libpq choose; may try IPv6)
-    try:
-        logger.info("Attempting connect to hostname %s:%s", host, port)
-        return psycopg2.connect(
-            user=user,
-            password=password,
-            host=host,
-            port=str(port),
-            dbname=dbname,
-            connect_timeout=connect_timeout,
-            sslmode="require",
-        )
-    except Exception as e:
-        logger.warning("Connect to hostname %s failed: %s", host, e)
-        last_exc = e
-
-    # 3) Try IPv6 explicit addresses (useful if IPv4 attempts failed but IPv6 works)
-    try:
-        infos6 = socket.getaddrinfo(host, port, family=socket.AF_INET6, type=socket.SOCK_STREAM)
-    except socket.gaierror as e:
-        infos6 = []
-        logger.debug("IPv6 resolution failed for %s: %s", host, e)
-
-    if infos6:
-        for info in infos6:
-            ipv6 = info[4][0]
-            try:
-                logger.info("Attempting connect to IPv6 %s:%s", ipv6, port)
-                return psycopg2.connect(
-                    user=user,
-                    password=password,
-                    host=ipv6,
-                    port=str(port),
-                    dbname=dbname,
-                    connect_timeout=connect_timeout,
-                    sslmode="require",
-                )
-            except Exception as e:
-                logger.warning("Connect to IPv6 %s failed: %s", ipv6, e)
-                last_exc = e
-
-    # Nothing worked — raise informative error
-    raise RuntimeError(
-        f"Failed to connect to Postgres (host={host!r}, port={port}). "
-        "Tried IPv4 addresses, hostname, and IPv6 addresses. See logs for details."
-    ) from last_exc
 
 # Validation helper
 def validate_order_data(phone, name, addressLine1, pincode, city, state, quantity, paymentProof):
@@ -1068,64 +1024,6 @@ def generate_label_pdf(order):
     c.save()
     return file_path
 
-# def generate_bulk_labels(order_ids):
-#     """
-#     Generates a PDF with two half-width labels per A6 page (left and right).
-#     If odd number of orders, the final page will contain the last label in the left slot.
-#     """
-#     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-#     pdf_path = os.path.join(LABEL_FOLDER, f"labels_bulk_{ts}.pdf")
-#     c = canvas.Canvas(pdf_path, pagesize=A6)
-#     width, height = A6
-
-#     # margins / gutter
-#     margin = 8 * mm
-#     gutter = 4 * mm  # space between two half-width labels
-
-#     # compute slot sizes
-#     usable_width = width - 2 * margin - gutter
-#     slot_width = usable_width / 2.0
-#     slot_height = height - 2 * margin
-
-#     conn = get_conn()
-#     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-#     # walk in steps of 2 and place two labels per page
-#     i = 0
-#     n = len(order_ids)
-#     while i < n:
-#         # New A6 page for every pair
-#         # left slot (always)
-#         oid_left = order_ids[i]
-#         cur.execute("SELECT * FROM orders WHERE id=%s", (oid_left,))
-#         left_row = cur.fetchone()
-#         if left_row:
-#             x_left = margin
-#             y_top = height - margin
-#             draw_label_block(c, dict(left_row), x_left, y_top, slot_width, slot_height)
-
-#         # right slot (if exists)
-#         if i + 1 < n:
-#             oid_right = order_ids[i + 1]
-#             cur.execute("SELECT * FROM orders WHERE id=%s", (oid_right,))
-#             right_row = cur.fetchone()
-#             if right_row:
-#                 x_right = margin + slot_width + gutter
-#                 y_top = height - margin
-#                 draw_label_block(c, dict(right_row), x_right, y_top, slot_width, slot_height)
-
-#         # --- add dashed vertical line between slots ---
-#         divider_x = margin + slot_width + (gutter / 2.0)
-#         c.setDash(3, 3)  # dash pattern: 3 on, 3 off
-#         c.line(divider_x, margin, divider_x, height - margin)
-#         c.setDash()  # reset to solid
-
-#         c.showPage()
-#         i += 2
-
-#     conn.close()
-#     c.save()
-#     return pdf_path
 
 # -------------------------
 # generate_bulk_labels (A6 two-per-page) using supabase
@@ -1304,21 +1202,40 @@ def admin_dashboard(request: Request):
         return RedirectResponse(url="/admin/login", status_code=302)
 
     try:
+        # def safe_count_and_sum(status_val=None):
+        #     try:
+        #         query = supabase.table("orders")
+        #         if status_val:
+        #             query = query.select("id, quantity").eq("status", status_val)
+        #         else:
+        #             query = query.select("id, quantity")
+        #         res = query.execute()
+        #         data, err = _unpack_supabase_response(res)
+        #         if err:
+        #             logger.warning("Count query returned error for status=%s: %s", status_val, err)
+        #             return 0, 0
+        #         rows = data or []
+        #         cnt = len(rows)
+        #         qty = sum((int(r.get("quantity") or 0) for r in rows))
+        #         return cnt, qty
+        #     except Exception as e:
+        #         logger.exception("safe_count_and_sum failed for status=%s: %s", status_val, e)
+        #         return 0, 0
+
         def safe_count_and_sum(status_val=None):
+            """
+            Count rows and sum quantities robustly by iterating in chunks.
+            """
             try:
-                query = supabase.table("orders")
-                if status_val:
-                    query = query.select("id, quantity").eq("status", status_val)
-                else:
-                    query = query.select("id, quantity")
-                res = query.execute()
-                data, err = _unpack_supabase_response(res)
-                if err:
-                    logger.warning("Count query returned error for status=%s: %s", status_val, err)
-                    return 0, 0
-                rows = data or []
-                cnt = len(rows)
-                qty = sum((int(r.get("quantity") or 0) for r in rows))
+                cnt = 0
+                qty = 0
+                for chunk in _iter_orders_chunks(select_cols="id,quantity,status", chunk_size=1000, status_filter=status_val):
+                    for r in chunk:
+                        cnt += 1
+                        try:
+                            qty += int(r.get("quantity") or 0)
+                        except Exception:
+                            pass
                 return cnt, qty
             except Exception as e:
                 logger.exception("safe_count_and_sum failed for status=%s: %s", status_val, e)
@@ -1393,6 +1310,89 @@ def admin_dashboard(request: Request):
 # ---- Data API for the dashboard table ----
 
 @app.get("/admin/orders")
+# def admin_list_orders(request: Request, status: str = "pending", q: str = "", page: int = 1, page_size: int = 20):
+#     require_admin(request)
+
+#     offset = max(0, (page - 1) * page_size)
+#     start = offset
+#     end = offset + page_size - 1
+
+#     try:
+#         # Build query
+#         query = supabase.table("orders").select("*")
+#         if status:
+#             query = query.eq("status", status)
+
+#         # Apply ordering & pagination (range uses start/end inclusive)
+#         # res = query.order("id", desc=True).range(start, end).execute()
+#         res = query.order("id", desc=True).execute()
+
+#         rows, err = _unpack_supabase_response(res)
+#         if err:
+#             logger.error("Supabase query error (list): %s", err)
+#             raise HTTPException(status_code=500, detail=f"Query failed: {err}")
+
+#         rows = rows or []
+
+#         # If q provided and client doesn't support ilike, do basic client-side filter
+#         if q:
+#             q_lower = q.lower()
+#             def matches(r):
+#                 return (
+#                     (r.get("phone") and q_lower in str(r.get("phone")).lower()) or
+#                     (r.get("name") and q_lower in str(r.get("name")).lower())
+#                 )
+#             rows = [r for r in rows if matches(r)]
+
+#         # Count total matching rows (simple approach)
+#         try:
+#             count_query = supabase.table("orders").select("id")
+#             if status:
+#                 count_query = count_query.eq("status", status)
+#             count_res = count_query.execute()
+#             count_data, count_err = _unpack_supabase_response(count_res)
+#             if count_err:
+#                 logger.warning("Count query returned unexpected shape/error, falling back to page length: %s", count_err)
+#                 total = len(rows)
+#             else:
+#                 total = len(count_data or [])
+#         except Exception as ce:
+#             logger.warning("Count query failed; using page length fallback: %s", ce)
+#             total = len(rows)
+
+#         # Normalize rows and convert created_at to datetime when possible
+#         normalized = []
+#         for r in rows:
+#             try:
+#                 od = dict(r)
+#                 if "created_at" in od and od["created_at"]:
+#                     od["created_at"] = _parse_iso_datetime(od["created_at"])
+#                 normalized.append(od)
+#             except Exception as e:
+#                 logger.warning("Row normalization failed: %s. Row repr: %s", e, repr(r)[:300])
+#                 try:
+#                     normalized.append(dict(r))
+#                 except Exception:
+#                     normalized.append(r)
+
+#         return templates.TemplateResponse(
+#             "admin_orders_filtered.html",
+#             {
+#                 "request": request,
+#                 "orders": [dict(r) for r in normalized],
+#                 "total": total,
+#                 "page": page,
+#                 "page_size": page_size,
+#                 "status": status,
+#                 "q": q
+#             }
+#         )
+
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.exception("Unhandled error in admin_list_orders: %s", e)
+#         raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 def admin_list_orders(request: Request, status: str = "pending", q: str = "", page: int = 1, page_size: int = 20):
     require_admin(request)
 
@@ -1401,47 +1401,49 @@ def admin_list_orders(request: Request, status: str = "pending", q: str = "", pa
     end = offset + page_size - 1
 
     try:
-        # Build query
-        query = supabase.table("orders").select("*")
+        # Build base query
+        base_query = supabase.table("orders").select("*")
         if status:
-            query = query.eq("status", status)
+            base_query = base_query.eq("status", status)
 
-        # Apply ordering & pagination (range uses start/end inclusive)
-        # res = query.order("id", desc=True).range(start, end).execute()
-        res = query.order("id", desc=True).execute()
-
-        rows, err = _unpack_supabase_response(res)
-        if err:
-            logger.error("Supabase query error (list): %s", err)
-            raise HTTPException(status_code=500, detail=f"Query failed: {err}")
-
-        rows = rows or []
-
-        # If q provided and client doesn't support ilike, do basic client-side filter
+        # If the client supplied a search q, we preserve your previous behaviour:
+        # fetch all rows (chunked), filter client-side, then paginate.
         if q:
             q_lower = q.lower()
+            all_rows = []
+            for chunk in _iter_orders_chunks(select_cols="*", chunk_size=1000, order_desc=True, status_filter=status):
+                all_rows.extend(chunk)
+
             def matches(r):
                 return (
                     (r.get("phone") and q_lower in str(r.get("phone")).lower()) or
                     (r.get("name") and q_lower in str(r.get("name")).lower())
                 )
-            rows = [r for r in rows if matches(r)]
 
-        # Count total matching rows (simple approach)
-        try:
-            count_query = supabase.table("orders").select("id")
-            if status:
-                count_query = count_query.eq("status", status)
-            count_res = count_query.execute()
-            count_data, count_err = _unpack_supabase_response(count_res)
-            if count_err:
-                logger.warning("Count query returned unexpected shape/error, falling back to page length: %s", count_err)
-                total = len(rows)
-            else:
-                total = len(count_data or [])
-        except Exception as ce:
-            logger.warning("Count query failed; using page length fallback: %s", ce)
-            total = len(rows)
+            filtered = [r for r in all_rows if matches(r)]
+            total = len(filtered)
+            page_rows = filtered[offset: offset + page_size]
+
+            rows = page_rows
+        else:
+            # Normal server-side pagination (use .range to fetch exactly the page)
+            try:
+                res = base_query.order("id", desc=True).range(start, end).execute()
+                rows, err = _unpack_supabase_response(res)
+                if err:
+                    logger.error("Supabase query error (list): %s", err)
+                    raise HTTPException(status_code=500, detail=f"Query failed: {err}")
+                rows = rows or []
+            except Exception as e:
+                logger.exception("Failed fetching page via range: %s", e)
+                # fallback: fetch everything chunked then slice (less efficient)
+                all_rows = []
+                for chunk in _iter_orders_chunks(select_cols="*", chunk_size=1000, order_desc=True, status_filter=status):
+                    all_rows.extend(chunk)
+                rows = all_rows[offset: offset + page_size]
+
+            # compute total via chunked counting (robust)
+            total = _count_rows(status=status if status else None)
 
         # Normalize rows and convert created_at to datetime when possible
         normalized = []
@@ -1478,33 +1480,52 @@ def admin_list_orders(request: Request, status: str = "pending", q: str = "", pa
         raise HTTPException(status_code=500, detail=f"Query failed: {e}")
 
 
-
 # -------------------------
 # get_status_counts via Supabase
 # -------------------------
+# def get_status_counts():
+#     """
+#     Returns dict with counts per status and overall.
+#     Uses Supabase select + client-side counting (robust across client versions).
+#     """
+#     try:
+#         # fetch all orders' id and quantity (could be heavy if many rows; consider aggregate/sql if table grows)
+#         res_all = supabase.table("orders").select("id, quantity, status").execute()
+#         data_all, err_all = _unpack_supabase_response(res_all)
+#         if err_all:
+#             logger.warning("get_status_counts: supabase select returned error: %s", err_all)
+#             # fallback zeros
+#             return {"pending": 0, "shipped": 0, "cancelled": 0, "all": 0}
+
+#         rows = data_all or []
+#         counts = {"pending": 0, "shipped": 0, "cancelled": 0}
+#         total = 0
+#         for r in rows:
+#             total += 1
+#             st = (r.get("status") or "").lower()
+#             if st in counts:
+#                 counts[st] += 1
+
+#         counts["all"] = total
+#         return counts
+#     except Exception as e:
+#         logger.exception("get_status_counts failed: %s", e)
+#         return {"pending": 0, "shipped": 0, "cancelled": 0, "all": 0}
+
 def get_status_counts():
     """
     Returns dict with counts per status and overall.
-    Uses Supabase select + client-side counting (robust across client versions).
+    Iterates over the table in chunks so it isn't limited by 1k-row responses.
     """
     try:
-        # fetch all orders' id and quantity (could be heavy if many rows; consider aggregate/sql if table grows)
-        res_all = supabase.table("orders").select("id, quantity, status").execute()
-        data_all, err_all = _unpack_supabase_response(res_all)
-        if err_all:
-            logger.warning("get_status_counts: supabase select returned error: %s", err_all)
-            # fallback zeros
-            return {"pending": 0, "shipped": 0, "cancelled": 0, "all": 0}
-
-        rows = data_all or []
         counts = {"pending": 0, "shipped": 0, "cancelled": 0}
         total = 0
-        for r in rows:
-            total += 1
-            st = (r.get("status") or "").lower()
-            if st in counts:
-                counts[st] += 1
-
+        for chunk in _iter_orders_chunks(select_cols="id,quantity,status", chunk_size=1000):
+            for r in chunk:
+                total += 1
+                st = (r.get("status") or "").lower()
+                if st in counts:
+                    counts[st] += 1
         counts["all"] = total
         return counts
     except Exception as e:
@@ -1911,23 +1932,115 @@ def admin_export_page(request: Request):
 #         raise HTTPException(status_code=500, detail=f"Failed to load summary: {e}")
 
 @app.get("/admin/summary", response_class=HTMLResponse)
+# def admin_summary(request: Request):
+#     """
+#     Show summary: for each quantity value, how many orders exist with that quantity,
+#     separated into pending, shipped, and total tables. Also include comma-separated
+#     order ids for groups where quantity > 1 AND count > 1.
+#     """
+#     require_admin(request)
+#     try:
+#         # Fetch quantity, id and status (lightweight)
+#         res = supabase.table("orders").select("quantity, id, status").execute()
+#         rows, err = _unpack_supabase_response(res)
+#         if err:
+#             logger.error("Failed to fetch orders for summary: %s", err)
+#             raise HTTPException(status_code=500, detail=f"Failed to fetch data: {err}")
+
+#         rows = rows or []
+
+#         def new_counter():
+#             return {"count": 0, "ids": []}
+
+#         counts_pending = {}
+#         counts_shipped = {}
+#         counts_total = {}
+
+#         for r in rows:
+#             # parse quantity safely to int; if malformed, skip
+#             try:
+#                 qty = int(r.get("quantity") or 0)
+#             except Exception:
+#                 continue
+
+#             oid = r.get("id")
+#             oid_str = str(oid) if oid is not None else None
+#             status = (r.get("status") or "").lower().strip()
+
+#             def add_to(counts_dict):
+#                 if qty not in counts_dict:
+#                     counts_dict[qty] = new_counter()
+#                 counts_dict[qty]["count"] += 1
+#                 if oid_str:
+#                     counts_dict[qty]["ids"].append(oid_str)
+
+#             add_to(counts_total)
+
+#             if status == "pending":
+#                 add_to(counts_pending)
+#             elif status == "shipped":
+#                 add_to(counts_shipped)
+
+#         # 🔑 UPDATED FUNCTION
+#         def make_summary_list(counts_dict):
+#             out = []
+#             for q in sorted(counts_dict.keys()):
+#                 entry = counts_dict[q]
+#                 ids_str = ""
+#                 # Only include ids if BOTH quantity > 1 and count > 1
+#                 if q > 1  and entry["ids"]:
+#                     seen = set()
+#                     unique_ids = []
+#                     for i in entry["ids"]:
+#                         if i not in seen:
+#                             seen.add(i)
+#                             unique_ids.append(i)
+#                     ids_str = ",".join(unique_ids)
+#                 out.append({"quantity": q, "count": entry["count"], "ids": ids_str})
+#             return out
+
+#         pending_summary = make_summary_list(counts_pending)
+#         shipped_summary = make_summary_list(counts_shipped)
+#         total_summary = make_summary_list(counts_total)
+
+#         def compute_totals(summary_list):
+#             total_orders = sum(item["count"] for item in summary_list)
+#             total_items = sum(item["quantity"] * item["count"] for item in summary_list)
+#             return total_orders, total_items
+
+#         pending_total_orders, pending_total_items = compute_totals(pending_summary)
+#         shipped_total_orders, shipped_total_items = compute_totals(shipped_summary)
+#         total_total_orders, total_total_items = compute_totals(total_summary)
+
+#         return templates.TemplateResponse("admin_summary.html", {
+#             "request": request,
+#             "pending_summary": pending_summary,
+#             "pending_total_orders": pending_total_orders,
+#             "pending_total_items": pending_total_items,
+#             "shipped_summary": shipped_summary,
+#             "shipped_total_orders": shipped_total_orders,
+#             "shipped_total_items": shipped_total_items,
+#             "total_summary": total_summary,
+#             "total_total_orders": total_total_orders,
+#             "total_total_items": total_total_items,
+#         })
+
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.exception("Unhandled error in admin_summary: %s", e)
+#         raise HTTPException(status_code=500, detail=f"Failed to load summary: {e}")
+
 def admin_summary(request: Request):
     """
     Show summary: for each quantity value, how many orders exist with that quantity,
     separated into pending, shipped, and total tables. Also include comma-separated
     order ids for groups where quantity > 1 AND count > 1.
+    This implementation iterates in chunks to avoid Supabase/PostgREST 1000-row limits.
     """
     require_admin(request)
     try:
-        # Fetch quantity, id and status (lightweight)
-        res = supabase.table("orders").select("quantity, id, status").execute()
-        rows, err = _unpack_supabase_response(res)
-        if err:
-            logger.error("Failed to fetch orders for summary: %s", err)
-            raise HTTPException(status_code=500, detail=f"Failed to fetch data: {err}")
-
-        rows = rows or []
-
+        # iterate chunks and aggregate counts (robust for large tables)
         def new_counter():
             return {"count": 0, "ids": []}
 
@@ -1935,39 +2048,38 @@ def admin_summary(request: Request):
         counts_shipped = {}
         counts_total = {}
 
-        for r in rows:
-            # parse quantity safely to int; if malformed, skip
-            try:
-                qty = int(r.get("quantity") or 0)
-            except Exception:
-                continue
+        for chunk in _iter_orders_chunks(select_cols="quantity,id,status", chunk_size=1000, order_desc=False):
+            for r in chunk:
+                # parse quantity safely to int; if malformed, skip
+                try:
+                    qty = int(r.get("quantity") or 0)
+                except Exception:
+                    continue
 
-            oid = r.get("id")
-            oid_str = str(oid) if oid is not None else None
-            status = (r.get("status") or "").lower().strip()
+                oid = r.get("id")
+                oid_str = str(oid) if oid is not None else None
+                status = (r.get("status") or "").lower().strip()
 
-            def add_to(counts_dict):
-                if qty not in counts_dict:
-                    counts_dict[qty] = new_counter()
-                counts_dict[qty]["count"] += 1
-                if oid_str:
-                    counts_dict[qty]["ids"].append(oid_str)
+                def add_to(counts_dict):
+                    if qty not in counts_dict:
+                        counts_dict[qty] = new_counter()
+                    counts_dict[qty]["count"] += 1
+                    if oid_str:
+                        counts_dict[qty]["ids"].append(oid_str)
 
-            add_to(counts_total)
+                add_to(counts_total)
+                if status == "pending":
+                    add_to(counts_pending)
+                elif status == "shipped":
+                    add_to(counts_shipped)
 
-            if status == "pending":
-                add_to(counts_pending)
-            elif status == "shipped":
-                add_to(counts_shipped)
-
-        # 🔑 UPDATED FUNCTION
         def make_summary_list(counts_dict):
             out = []
             for q in sorted(counts_dict.keys()):
                 entry = counts_dict[q]
                 ids_str = ""
                 # Only include ids if BOTH quantity > 1 and count > 1
-                if q > 1  and entry["ids"]:
+                if q > 1 and entry["ids"]:
                     seen = set()
                     unique_ids = []
                     for i in entry["ids"]:
@@ -2009,7 +2121,6 @@ def admin_summary(request: Request):
     except Exception as e:
         logger.exception("Unhandled error in admin_summary: %s", e)
         raise HTTPException(status_code=500, detail=f"Failed to load summary: {e}")
-
 
 
 @app.get("/admin/duplicates", response_class=HTMLResponse)
