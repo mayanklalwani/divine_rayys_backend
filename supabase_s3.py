@@ -9,7 +9,7 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Define bucket and file details
-bucket_name = "divinerayysdiwali2025"   # Replace with your bucket name
+bucket_name = "childrenshealings2025"   # Replace with your bucket name
 local_file_path = "example.txt"  # File you want to upload
 storage_file_path = "uploads/example.txt"  # Path inside bucket
 

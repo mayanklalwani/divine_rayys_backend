@@ -136,7 +136,7 @@ def _fetch_orders_by_ids(order_ids):
 
     try:
         # supabase-py supports .in_("id", order_ids)
-        res = supabase.table("orders").select("*").in_("id", order_ids).execute()
+        res = supabase.table("orders_ch2025").select("*").in_("id", order_ids).execute()
         data, err = _unpack_supabase_response(res)
         if err:
             logger.error("Failed to fetch orders by ids: %s", err)
@@ -261,7 +261,7 @@ def _iter_orders_chunks(select_cols="id,quantity,status", chunk_size=1000, order
     start = 0
     while True:
         # build base query
-        q = supabase.table("orders").select(select_cols)
+        q = supabase.table("orders_ch2025").select(select_cols)
         if status_filter:
             try:
                 q = q.eq("status", status_filter)
@@ -448,7 +448,7 @@ async def create_order(
 
     # ---- 1) check existing pending order by email or phone ----
     try:
-        res_phone = supabase.table("orders").select("id").eq("phone", phone).eq("status", "pending").limit(1).execute()
+        res_phone = supabase.table("orders_ch2025").select("id").eq("phone", phone).eq("status", "pending").limit(1).execute()
         data_p, err_p = _unpack_supabase_response(res_phone)
         if err_p:
             logger.error("Supabase error while checking phone: %s", err_p)
@@ -479,7 +479,7 @@ async def create_order(
     }
 
     try:
-        ins = supabase.table("orders").insert(payload).execute()
+        ins = supabase.table("orders_ch2025").insert(payload).execute()
         ins_data, ins_err = _unpack_supabase_response(ins)
         if ins_err:
             logger.error("Supabase insert error: %s", ins_err)
@@ -557,7 +557,7 @@ async def create_order(
 
             # update the row with paymentProof (if url found)
             if payment_proof_url:
-                upd = supabase.table("orders").update({"paymentproof": payment_proof_url}).eq("id", order_id).execute()
+                upd = supabase.table("orders_ch2025").update({"paymentproof": payment_proof_url}).eq("id", order_id).execute()
                 upd_d, upd_err = _unpack_supabase_response(upd)
                 if upd_err:
                     logger.error("Failed to update order with paymentProof: %s", upd_err)
@@ -983,7 +983,7 @@ def draw_wrapped_text_slot(c, text, x, y, max_width, min_y, font_name="Helvetica
 @app.get("/orders")
 def get_orders():
     try:
-        res = supabase.table("orders").select("*").order("created_at", desc=True).execute()
+        res = supabase.table("orders_ch2025").select("*").order("created_at", desc=True).execute()
 
         data, err = _unpack_supabase_response(res)
         if err:
@@ -1134,7 +1134,7 @@ def generate_bulk_labels_a4(order_ids):
 @app.get("/orders/{order_id}/label")
 def get_order_label(order_id: int):
     try:
-        r = supabase.table("orders").select("*").eq("id", order_id).execute()
+        r = supabase.table("orders_ch2025").select("*").eq("id", order_id).execute()
         if r.error:
             raise RuntimeError(r.error)
         if not r.data:
@@ -1204,7 +1204,7 @@ def admin_dashboard(request: Request):
     try:
         # def safe_count_and_sum(status_val=None):
         #     try:
-        #         query = supabase.table("orders")
+        #         query = supabase.table("orders_ch2025")
         #         if status_val:
         #             query = query.select("id, quantity").eq("status", status_val)
         #         else:
@@ -1248,7 +1248,7 @@ def admin_dashboard(request: Request):
 
         # fetch pending orders
         try:
-            res_orders = supabase.table("orders").select("*").eq("status", "pending").order("created_at", desc=True).limit(5000).execute()
+            res_orders = supabase.table("orders_ch2025").select("*").eq("status", "pending").order("created_at", desc=True).limit(5000).execute()
             orders_data, orders_err = _unpack_supabase_response(res_orders)
             if orders_err:
                 logger.error("Failed to fetch pending orders: %s", orders_err)
@@ -1319,7 +1319,7 @@ def admin_dashboard(request: Request):
 
 #     try:
 #         # Build query
-#         query = supabase.table("orders").select("*")
+#         query = supabase.table("orders_ch2025").select("*")
 #         if status:
 #             query = query.eq("status", status)
 
@@ -1346,7 +1346,7 @@ def admin_dashboard(request: Request):
 
 #         # Count total matching rows (simple approach)
 #         try:
-#             count_query = supabase.table("orders").select("id")
+#             count_query = supabase.table("orders_ch2025").select("id")
 #             if status:
 #                 count_query = count_query.eq("status", status)
 #             count_res = count_query.execute()
@@ -1402,7 +1402,7 @@ def admin_list_orders(request: Request, status: str = "pending", q: str = "", pa
 
     try:
         # Build base query
-        base_query = supabase.table("orders").select("*")
+        base_query = supabase.table("orders_ch2025").select("*")
         if status:
             base_query = base_query.eq("status", status)
 
@@ -1490,7 +1490,7 @@ def admin_list_orders(request: Request, status: str = "pending", q: str = "", pa
 #     """
 #     try:
 #         # fetch all orders' id and quantity (could be heavy if many rows; consider aggregate/sql if table grows)
-#         res_all = supabase.table("orders").select("id, quantity, status").execute()
+#         res_all = supabase.table("orders_ch2025").select("id, quantity, status").execute()
 #         data_all, err_all = _unpack_supabase_response(res_all)
 #         if err_all:
 #             logger.warning("get_status_counts: supabase select returned error: %s", err_all)
@@ -1543,7 +1543,7 @@ def admin_update_status(order_id: int, request: Request, status: str = Form(...)
     if status not in ("pending", "shipped", "cancelled"):
         raise HTTPException(status_code=400, detail="Invalid status")
     try:
-        res = supabase.table("orders").update({"status": status}).eq("id", order_id).execute()
+        res = supabase.table("orders_ch2025").update({"status": status}).eq("id", order_id).execute()
         data, err = _unpack_supabase_response(res)
         if err:
             logger.error("admin_update_status supabase error: %s", err)
@@ -1579,14 +1579,14 @@ async def admin_bulk_action(
     # operate using Supabase
     try:
         if action == "mark_shipped":
-            res = supabase.table("orders").update({"status": "shipped"}).in_("id", order_ids).execute()
+            res = supabase.table("orders_ch2025").update({"status": "shipped"}).in_("id", order_ids).execute()
             data, err = _unpack_supabase_response(res)
             if err:
                 logger.error("bulk mark_shipped error: %s", err)
             return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
 
         elif action == "cancel":
-            res = supabase.table("orders").update({"status": "cancelled"}).in_("id", order_ids).execute()
+            res = supabase.table("orders_ch2025").update({"status": "cancelled"}).in_("id", order_ids).execute()
             data, err = _unpack_supabase_response(res)
             if err:
                 logger.error("bulk cancel error: %s", err)
@@ -1611,7 +1611,7 @@ def admin_cancel_single(request: Request, order_id: int):
     if not is_logged_in(request):
         return RedirectResponse(url="/admin/login", status_code=303)
     try:
-        res = supabase.table("orders").update({"status": "cancelled"}).eq("id", order_id).execute()
+        res = supabase.table("orders_ch2025").update({"status": "cancelled"}).eq("id", order_id).execute()
         data, err = _unpack_supabase_response(res)
         if err:
             logger.error("admin_cancel_single error: %s", err)
@@ -1651,7 +1651,7 @@ async def get_order_screenshot(order_id: str):
 
 @app.get("/_supabase_dbg")
 def _supabase_dbg():
-    res = supabase.table("orders").select("*").limit(1).execute()
+    res = supabase.table("orders_ch2025").select("*").limit(1).execute()
     return {
         "type": str(type(res)),
         "repr": repr(res)[:200],
@@ -1684,7 +1684,7 @@ def _fetch_export_rows(start_id=None, end_id=None):
     if provided. Each row: {'id': ..., 'name': ..., 'city': ..., 'quantity': ...}
     """
     try:
-        q = supabase.table("orders").select("id, name, city, status, quantity")
+        q = supabase.table("orders_ch2025").select("id, name, city, status, quantity")
 
         # Only pending or shipped (try server-side .in_ if available)
         try:
@@ -1893,7 +1893,7 @@ def admin_export_page(request: Request):
 #     require_admin(request)
 #     try:
 #         # Fetch only quantity and id (lightweight)
-#         res = supabase.table("orders").select("quantity, id").execute()
+#         res = supabase.table("orders_ch2025").select("quantity, id").execute()
 #         rows, err = _unpack_supabase_response(res)
 #         if err:
 #             logger.error("Failed to fetch orders for summary: %s", err)
@@ -1941,7 +1941,7 @@ def admin_export_page(request: Request):
 #     require_admin(request)
 #     try:
 #         # Fetch quantity, id and status (lightweight)
-#         res = supabase.table("orders").select("quantity, id, status").execute()
+#         res = supabase.table("orders_ch2025").select("quantity, id, status").execute()
 #         rows, err = _unpack_supabase_response(res)
 #         if err:
 #             logger.error("Failed to fetch orders for summary: %s", err)
