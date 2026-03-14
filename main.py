@@ -1629,6 +1629,51 @@ def admin_single_label(request: Request, order_id: int):
         return RedirectResponse(url="/admin/login", status_code=303)
     return get_order_label(order_id)
 
+def _pick_latest_file(files):
+    """
+    From a list of file entries from Supabase storage list(), return the file name
+    with the latest timestamp. Uses created_at/updated_at if present, else sorts by
+    name (uploaded filenames use YYYYMMDDHHMMSS_* so lexicographic sort = newest last).
+    """
+    if not files:
+        return None
+    # Normalize: ensure we have a list of dict-like items with at least "name"
+    items = []
+    for f in files:
+        if isinstance(f, dict):
+            name = f.get("name")
+        else:
+            name = getattr(f, "name", None)
+        if not name:
+            continue
+        created = None
+        if isinstance(f, dict):
+            created = f.get("created_at") or f.get("updated_at") or f.get("createdAt") or f.get("updatedAt")
+        else:
+            created = getattr(f, "created_at", None) or getattr(f, "updated_at", None)
+        items.append({"name": name, "created": created})
+    if not items:
+        return None
+    # Prefer sorting by created_at/updated_at if available
+    with_ts = [x for x in items if x["created"] is not None]
+    if with_ts:
+        def parse_ts(t):
+            if t is None:
+                return None
+            if isinstance(t, (int, float)):
+                return t
+            s = str(t)
+            try:
+                return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                return None
+        with_ts.sort(key=lambda x: parse_ts(x["created"]) or 0, reverse=True)
+        return with_ts[0]["name"]
+    # Fallback: sort by name; uploads use YYYYMMDDHHMMSS_originalname so latest has largest name
+    items.sort(key=lambda x: x["name"], reverse=True)
+    return items[0]["name"]
+
+
 @app.get("/admin/orders/{order_id}/screenshot")
 async def get_order_screenshot(order_id: str):
     try:
@@ -1637,8 +1682,16 @@ async def get_order_screenshot(order_id: str):
         if not files:
             raise HTTPException(status_code=404, detail="Payment screenshot not found")
 
-        # take first image file (you can improve by filtering for png/jpg/pdf etc.)
-        file_name = files[0]["name"]
+        # Unwrap if Supabase returns {"name": "...", "id": "...", "metadata": {"..."}} or list of such
+        if isinstance(files, dict) and "id" not in files:
+            file_list = files if isinstance(files, list) else list(files.values()) if isinstance(files, dict) else []
+        else:
+            file_list = files if isinstance(files, list) else [files]
+
+        file_name = _pick_latest_file(file_list)
+        if not file_name:
+            raise HTTPException(status_code=404, detail="Payment screenshot not found")
+
         file_path = f"uploads/{order_id}/{file_name}"
 
         # generate signed URL valid for 1 hour
@@ -1646,6 +1699,8 @@ async def get_order_screenshot(order_id: str):
 
         return {"url": signed_url["signedURL"]}
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
