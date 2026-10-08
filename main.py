@@ -1082,13 +1082,15 @@ def generate_bulk_labels(order_ids):
 # -------------------------
 # generate_bulk_labels_a4 (A4 landscape 6-per-page) using supabase
 # -------------------------
-def generate_bulk_labels_a4(order_ids):
+def generate_bulk_labels_a4(order_ids, sort_by_name=False):
     """
     A4 landscape, 3 columns x 2 rows = 6 labels per page.
-    Uses Supabase to fetch orders and preserves input ordering.
+    Uses Supabase to fetch orders and preserves input ordering,
+    unless sort_by_name is set, in which case labels are ordered A–Z by recipient name.
     """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    pdf_path = os.path.join(LABEL_FOLDER, f"labels_bulk_a4_{ts}.pdf")
+    suffix = "_az" if sort_by_name else ""
+    pdf_path = os.path.join(LABEL_FOLDER, f"labels_bulk_a4{suffix}_{ts}.pdf")
 
     # A4 landscape
     page_width, page_height = landscape(A4)
@@ -1108,6 +1110,8 @@ def generate_bulk_labels_a4(order_ids):
     c = canvas.Canvas(pdf_path, pagesize=(page_width, page_height))
 
     orders = _fetch_orders_by_ids(order_ids)
+    if sort_by_name:
+        orders.sort(key=lambda o: ((o.get("name") or "").strip().casefold(), int(o.get("id") or 0)))
 
     for idx, order in enumerate(orders):
         index_in_page = idx % (cols * rows)
@@ -1592,9 +1596,11 @@ async def admin_bulk_action(
                 logger.error("bulk cancel error: %s", err)
             return RedirectResponse(url="/admin/orders?status=pending", status_code=303)
 
-        elif action == "generate_labels":
-            # create pdf from supabase-fetched rows (we will preserve order passed)
-            pdf_path = generate_bulk_labels_a4(order_ids)
+        elif action in ("generate_labels", "generate_labels_alpha"):
+            pdf_path = generate_bulk_labels_a4(
+                order_ids,
+                sort_by_name=(action == "generate_labels_alpha"),
+            )
             return FileResponse(pdf_path, media_type="application/pdf", filename=os.path.basename(pdf_path))
 
     except Exception as e:
@@ -1805,7 +1811,7 @@ def _fetch_export_rows(start_id=None, end_id=None):
 # ---------- New endpoint: export orders ----------
 @app.post("/admin/export-orders")
 @app.post("/admin/export-orders")
-def admin_export_orders(request: Request, start_id: str = Form(None), end_id: str = Form(None), fmt: str = Form("pdf")):
+def admin_export_orders(request: Request, start_id: str = Form(None), end_id: str = Form(None), fmt: str = Form("pdf"), sort: str = Form("id")):
     """
     Admin-only endpoint that creates a PDF or XLSX of orders with columns:
       S.No (order.id), Name, City, Quantity, Dispatched (blank), Received (blank)
@@ -1814,12 +1820,17 @@ def admin_export_orders(request: Request, start_id: str = Form(None), end_id: st
       start_id (optional): if set, only orders with id >= start_id are exported
       end_id (optional): if set, only orders with id <= end_id are exported
       fmt: 'pdf' or 'xlsx'
+      sort: 'id' (default, by S.No) or 'name' (A–Z by recipient name)
     """
     require_admin(request)
 
     fmt = (fmt or "pdf").lower()
     if fmt not in ("pdf", "xlsx"):
         raise HTTPException(status_code=400, detail="Unsupported format. Use 'pdf' or 'xlsx'.")
+
+    sort_key = (sort or "id").lower()
+    if sort_key not in ("id", "name"):
+        sort_key = "id"
 
     # Normalize empty strings to None
     if start_id in ("", None):
@@ -1834,6 +1845,8 @@ def admin_export_orders(request: Request, start_id: str = Form(None), end_id: st
 
     try:
         rows = _fetch_export_rows(start_id=start_val, end_id=end_val)
+        if sort_key == "name":
+            rows.sort(key=lambda r: ((r.get("name") or "").strip().casefold(), int(r.get("id") or 0)))
 
         # Build table data: headers + rows (added Quantity column)
         table_data = []
@@ -1860,6 +1873,8 @@ def admin_export_orders(request: Request, start_id: str = Form(None), end_id: st
                 range_desc = f" — starting id >= {start_val}"
             elif end_val:
                 range_desc = f" — up to id <= {end_val}"
+            if sort_key == "name":
+                range_desc += " — sorted by name (A–Z)"
             title = Paragraph(f"Orders Export (status: pending/shipped){range_desc}", styles["Heading2"])
             story.append(title)
             story.append(Spacer(1, 6))
@@ -1882,7 +1897,8 @@ def admin_export_orders(request: Request, start_id: str = Form(None), end_id: st
 
             story.append(t)
             doc.build(story)
-            filename = f"orders_{ts}.pdf"
+            suffix = "_az" if sort_key == "name" else ""
+            filename = f"orders{suffix}_{ts}.pdf"
             return FileResponse(pdf_path, media_type="application/pdf", filename=filename)
 
         else:  # fmt == xlsx
@@ -1924,7 +1940,8 @@ def admin_export_orders(request: Request, start_id: str = Form(None), end_id: st
             ws.column_dimensions["F"].width = 12  # Received
 
             wb.save(xlsx_path)
-            filename = f"orders_{ts}.xlsx"
+            suffix = "_az" if sort_key == "name" else ""
+            filename = f"orders{suffix}_{ts}.xlsx"
             return FileResponse(xlsx_path, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=filename)
 
     except HTTPException:

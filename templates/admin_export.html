@@ -23,6 +23,14 @@
       </select>
     </div>
 
+    <div style="display:flex; flex-direction:column;">
+      <label for="sort">Order</label>
+      <select id="sort" name="sort" style="width:160px;">
+        <option value="id" selected>S.No</option>
+        <option value="name">Name (A–Z)</option>
+      </select>
+    </div>
+
     <div>
       <button type="submit" class="btn">Download</button>
     </div>
@@ -33,6 +41,7 @@
   Only orders with status <b>pending</b> or <b>shipped</b> will be exported.  
   If <b>Starting S.No</b> is set, only orders with ID ≥ Starting S.No are included.
   If <b>Ending S.No</b> is set, only orders with ID ≤ Ending S.No are included.
+  Choose <b>Name (A–Z)</b> to sort the file alphabetically by recipient name; otherwise rows stay in S.No order.
 </p>
 
 <p style="font-size:0.9em; color:#666; margin-top:4px;">
