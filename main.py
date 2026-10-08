@@ -1176,7 +1176,7 @@ def require_admin(request: Request):
 # ---- Login pages ----
 @app.get("/admin/login", response_class=HTMLResponse)
 def admin_login_page(request: Request):
-    return templates.TemplateResponse("admin_login.html", {"request": request, "error": None})
+    return templates.TemplateResponse(request, "admin_login.html", {"error": None})
 
 @app.post("/admin/login")
 async def admin_login(request: Request):
@@ -1189,7 +1189,7 @@ async def admin_login(request: Request):
         # simplest possible session flag
         resp.set_cookie(SESSION_COOKIE, "1", httponly=True, samesite="lax")
         return resp
-    return templates.TemplateResponse("admin_login.html", {"request": request, "error": "Invalid credentials"}, status_code=401)
+    return templates.TemplateResponse(request, "admin_login.html", {"error": "Invalid credentials"}, status_code=401)
 
 @app.get("/admin/logout")
 def admin_logout(request: Request):
@@ -1299,9 +1299,9 @@ def admin_dashboard(request: Request):
         }
 
         return templates.TemplateResponse(
+            request,
             "admin_orders.html",
             {
-                "request": request,
                 "stats": stats,
                 "orders": orders
             }
@@ -1465,9 +1465,9 @@ def admin_list_orders(request: Request, status: str = "pending", q: str = "", pa
                     normalized.append(r)
 
         return templates.TemplateResponse(
+            request,
             "admin_orders_filtered.html",
             {
-                "request": request,
                 "orders": [dict(r) for r in normalized],
                 "total": total,
                 "page": page,
@@ -1953,7 +1953,7 @@ def admin_export_orders(request: Request, start_id: str = Form(None), end_id: st
 @app.get("/admin/export", response_class=HTMLResponse)
 def admin_export_page(request: Request):
     require_admin(request)
-    return templates.TemplateResponse("admin_export.html", {"request": request})
+    return templates.TemplateResponse(request, "admin_export.html")
 
 # @app.get("/admin/summary", response_class=HTMLResponse)
 # def admin_summary(request: Request):
@@ -2175,8 +2175,7 @@ def admin_summary(request: Request):
         shipped_total_orders, shipped_total_items = compute_totals(shipped_summary)
         total_total_orders, total_total_items = compute_totals(total_summary)
 
-        return templates.TemplateResponse("admin_summary.html", {
-            "request": request,
+        return templates.TemplateResponse(request, "admin_summary.html", {
             "pending_summary": pending_summary,
             "pending_total_orders": pending_total_orders,
             "pending_total_items": pending_total_items,
@@ -2240,8 +2239,7 @@ def admin_duplicates(request: Request, limit: int = Query(None, description="Opt
                         groups[key]["rows"] = groups[key]["rows"][:remaining]
                     remaining -= len(groups[key]["rows"])
 
-        return templates.TemplateResponse("duplicates.html", {
-            "request": request,
+        return templates.TemplateResponse(request, "duplicates.html", {
             "groups": groups,
             "total_dup_addresses": len([k for k in groups.keys() if groups[k]["rows"]]),  # count groups with at least 1 row
             "total_rows": total_rows,
@@ -2363,8 +2361,7 @@ def admin_group_page(request: Request, start_id: str = None, end_id: str = None,
         sorted_groups = [groups[k] for k in sorted_keys]
         total_rows = len(rows)
 
-        return templates.TemplateResponse("admin_group.html", {
-            "request": request,
+        return templates.TemplateResponse(request, "admin_group.html", {
             "groups": sorted_groups,
             "start_id": start_id or "",
             "end_id": end_id or "",
